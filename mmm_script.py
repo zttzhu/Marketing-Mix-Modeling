@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plot
+pd.set_option('display.float_format', '{:.2f}'.format)
+
 # %%
 mmm_data = pd.read_csv("data.csv")
 # %%
@@ -43,8 +45,10 @@ sales_col = ['sales']
 # Heatmap between impressions and sales - sales has the strongest correlation with mdip_vidtr
 plot.figure(figsize=(10,8))
 sns.heatmap(mmm_data[mdip_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
+# %%
 # Spend and sales: mdsp_vidtr has the strongest correlation with sales
 sns.heatmap(mmm_data[mdsp_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
+# %%
 # Draw distribution
 sns.histplot(mmm_data[sales_col])
 sns.pairplot(mmm_data[mdip_col+sales_col],x_vars= mdip_col,y_vars=sales_col)
@@ -56,7 +60,18 @@ def adstock(support,half_life):
     adstock = np.zeros(num_period)
     for i in range(num_period):
         if i ==0 :
-            adstock[i] = (1.0 - decay[i]) * support[i]
+            adstock[i] = (1.0 - decay) * support[i]
         else:
-            adstock[i] = (1.0 - decay[i]) * support[i] + decay[i] * adstock[i-1]
-
+            adstock[i] = (1.0 - decay) * support[i] + decay * adstock[i-1]
+    return adstock
+# %%
+# Create Adstock variables
+for col in mdip_col:
+    new_col = 'ad_' + col
+    mmm_data[new_col] = adstock(mmm_data[col],1)
+# %%
+# check to see if it is working correctly
+check_column = ['mdip_dm','ad_mdip_dm']
+mmm_data[check_column]
+# %%
+# create s-curve function
