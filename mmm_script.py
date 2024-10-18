@@ -75,3 +75,4 @@ check_column = ['mdip_dm','ad_mdip_dm']
 mmm_data[check_column]
 # %%
 # create s-curve function
+# Use hill function to capture, need to define half-saturation point and shape parameter
