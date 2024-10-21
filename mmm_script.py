@@ -76,3 +76,27 @@ mmm_data[check_column]
 # %%
 # create s-curve function
 # Use hill function to capture, need to define half-saturation point and shape parameter
+# Input x is adstock, s is shape parameter and a is half saturation 
+def scrv_transformation(adstock,a,s):
+    num_period = adstock.shape[0]
+    scrv = np.zeros(num_period)
+    for i in range(num_period):
+        scrv[i] = 1/(1+(adstock[i]/a)**(-s))
+    return scrv
+# %%
+# Apply s-curve transformation to all adstock variables
+adstock_col = [col for col in mmm_data.columns if "ad_" in col]
+for col in adstock_col:
+    scrv_cols = 'scrv_'+col
+    mmm_data[scrv_cols] = scrv_transformation(mmm_data[col],0.5,1)
+# %%
+check_column_scrv = ['mdip_dm','ad_mdip_dm','scrv_ad_mdip_dm']
+mmm_data[check_column_scrv]
+# %%
+adstock = 2431942.50
+a = 1
+s = 0.5
+1/(1+(adstock/a)**(-s))
+# %%
+(adstock/a)**(-s)
+# %%
