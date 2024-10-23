@@ -94,9 +94,10 @@ check_column_scrv = ['mdip_dm','ad_mdip_dm','scrv_ad_mdip_dm']
 mmm_data[check_column_scrv]
 # %%
 adstock = 2431942.50
-a = 1
+a = 2431942
 s = 0.5
 1/(1+(adstock/a)**(-s))
 # %%
 (adstock/a)**(-s)
+# a here is the half saturation impression, so need to check how to get the half saturation of each media channel
 # %%
