@@ -101,3 +101,4 @@ s = 0.5
 (adstock/a)**(-s)
 # a here is the half saturation impression, so need to check how to get the half saturation of each media channel
 # %%
+# We will need to find a way to derive half saturation point here
