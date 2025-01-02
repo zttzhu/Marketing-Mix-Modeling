@@ -5,12 +5,16 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plot
+import prophet as Prophet
 pd.set_option('display.float_format', '{:.2f}'.format)
 
 # %%
 mmm_data = pd.read_csv("data.csv")
 # %%
 mmm_data
+# %%
+# Check to see if there are any NAs
+mmm_data.columns[mmm_data.isna().sum()>0] # No NAs
 # %%
 # understand data
 mmm_data.describe()
@@ -42,6 +46,8 @@ base_vars = me_col+hol_col+sea_col+st_col+dis_col
 sales_col = ['sales']
 # %% 
 # EDA 
+# plot sales overtime. 
+plot.plot(mmm_data['wk_strt_dt'],mmm_data['sales'])
 # Heatmap between impressions and sales - sales has the strongest correlation with mdip_vidtr
 plot.figure(figsize=(10,8))
 sns.heatmap(mmm_data[mdip_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
@@ -52,6 +58,19 @@ sns.heatmap(mmm_data[mdsp_col+sales_col].corr(),square=True,annot=True,vmax=1,vm
 # Draw distribution
 sns.histplot(mmm_data[sales_col])
 sns.pairplot(mmm_data[mdip_col+sales_col],x_vars= mdip_col,y_vars=sales_col)
+
+# %%
+# Plot the time series plot for sales
+trend_sales = mmm_data[['wk_strt_dt','sales']].rename(columns = {'wk_strt_dt':'ds','sales':'y'})
+# Fit model
+model = Prophet.Prophet()
+model.fit(trend_sales)
+sales_fit = model.predict(model.make_future_dataframe(periods=0))
+# %%
+# Extract and plot
+trend = sales_fit[['ds','trend']]
+plot.plot(trend['ds'],trend['trend'],label = 'trend')
+
 # %%
 # create adstock function
 def adstock(support,half_life):
