@@ -46,8 +46,11 @@ base_vars = me_col+hol_col+sea_col+st_col+dis_col
 sales_col = ['sales']
 # %% 
 # EDA 
-# plot sales overtime. 
+# plot sales overtime. Observe seasonal pattern - Reach the peak by the end of each year
+plot.figure(figsize=(16,8))
 plot.plot(mmm_data['wk_strt_dt'],mmm_data['sales'])
+
+# %%
 # Heatmap between impressions and sales - sales has the strongest correlation with mdip_vidtr
 plot.figure(figsize=(10,8))
 sns.heatmap(mmm_data[mdip_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
@@ -60,17 +63,26 @@ sns.histplot(mmm_data[sales_col])
 sns.pairplot(mmm_data[mdip_col+sales_col],x_vars= mdip_col,y_vars=sales_col)
 
 # %%
-# Plot the time series plot for sales
+# Plot the time series plot for sales. Not seeing any seasonal pattern heres
 trend_sales = mmm_data[['wk_strt_dt','sales']].rename(columns = {'wk_strt_dt':'ds','sales':'y'})
+#trend_sales['y'] = trend_sales['y'].apply(lambda x: np.log(x + 1)) 
 # Fit model
-model = Prophet.Prophet()
+model = Prophet.Prophet(yearly_seasonality=True, weekly_seasonality=True)
 model.fit(trend_sales)
 sales_fit = model.predict(model.make_future_dataframe(periods=0))
 # %%
-# Extract and plot
+# Extract and plot --> The trend is going down straightly
 trend = sales_fit[['ds','trend']]
 plot.plot(trend['ds'],trend['trend'],label = 'trend')
-
+# %%
+# Generate yearly column to double check --> Sales raised from 2015-2017 but in the trend chart 
+# it is straightly going down
+mmm_data['year'] = mmm_data['wk_strt_dt'].dt.year
+mmm_data.groupby('year')['sales'].sum()
+# %%
+# Seasonality component
+seasonal = sales_fit[['ds','yearly']]
+plot.plot(seasonal['ds'],seasonal['yearly'],label = 'seasonal')
 # %%
 # create adstock function
 def adstock(support,half_life):
