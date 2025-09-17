@@ -6,6 +6,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plot
 import prophet as Prophet
+import statsmodels.api as sm
 pd.set_option('display.float_format', '{:.2f}'.format)
 
 # %%
@@ -133,3 +134,40 @@ s = 0.5
 # a here is the half saturation impression, so need to check how to get the half saturation of each media channel
 # %%
 # We will need to find a way to derive half saturation point here
+# %%
+# Baseline MMM using OLS on raw spend and control variables
+media_cols_baseline = ['mdsp_vidtr', 'mdsp_dm', 'mdsp_inst']
+control_cols_baseline = ['me_ics_all', 'st_ct']
+
+# Log-transform sales and features to stabilize variance
+model_data = mmm_data.copy()
+model_data['sales'] = np.log1p(model_data['sales'])
+for col in media_cols_baseline + control_cols_baseline:
+    model_data[col] = np.log1p(model_data[col])
+
+# Chronological train/test split
+split_point = int(len(model_data) * 0.8)
+train = model_data.iloc[:split_point]
+test = model_data.iloc[split_point:]
+
+# Fit simple linear regression
+X_train = sm.add_constant(train[media_cols_baseline + control_cols_baseline])
+y_train = train['sales']
+baseline_model = sm.OLS(y_train, X_train).fit()
+
+# Evaluate on holdout set
+X_test = sm.add_constant(test[media_cols_baseline + control_cols_baseline])
+y_test = test['sales']
+y_pred = baseline_model.predict(X_test)
+rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
+mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+
+print(baseline_model.summary())
+print(f"RMSE: {rmse:.2f}")
+print(f"MAPE: {mape:.2f}%")
+
+# Plot actual vs predicted sales
+plot.figure(figsize=(12,6))
+plot.plot(test['wk_strt_dt'], np.expm1(y_test), label='Actual')
+plot.plot(test['wk_strt_dt'], np.expm1(y_pred), label='Predicted')
+plot.legend()
