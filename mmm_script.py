@@ -1,16 +1,43 @@
 # %%
-print("Hello Marketing Mix Modeling")
+"""
+Marketing Mix Modeling (MMM) Script
+====================================
+This script implements a comprehensive MMM workflow using:
+1. Robyn-style methodology with adstock and saturation transformations
+2. Baseline OLS model for comparison
+3. Model validation, diagnostics, and budget optimization
+
+"""
+
+# %%
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+# Model configuration parameters
+TRAIN_TEST_SPLIT = 0.8  # Proportion of data for training
+OPTIMIZATION_MAXITER = 30  # Maximum iterations for hyperparameter optimization
+OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
+ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
+OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
+
+print("="*80)
+print("MARKETING MIX MODELING - CONFIGURATION")
+print("="*80)
+print(f"Train/Test Split: {TRAIN_TEST_SPLIT}")
+print(f"Adstock Type: {ADSTOCK_TYPE}")
+print(f"Optimize Hyperparameters: {OPTIMIZE_HYPERPARAMS}")
+print("="*80)
+
 # %%
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plot
-import prophet as Prophet
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 from scipy.optimize import differential_evolution, minimize
-from scipy.stats import pearsonr
+from scipy import stats
 import warnings
 import statsmodels.api as sm
 warnings.filterwarnings('ignore')
@@ -70,75 +97,6 @@ sns.heatmap(mmm_data[mdsp_col+sales_col].corr(),square=True,annot=True,vmax=1,vm
 sns.histplot(mmm_data[sales_col])
 sns.pairplot(mmm_data[mdip_col+sales_col],x_vars= mdip_col,y_vars=sales_col)
 
-# %%
-# Plot the time series plot for sales. Not seeing any seasonal pattern heres
-trend_sales = mmm_data[['wk_strt_dt','sales']].rename(columns = {'wk_strt_dt':'ds','sales':'y'})
-#trend_sales['y'] = trend_sales['y'].apply(lambda x: np.log(x + 1)) 
-# Fit model
-model = Prophet.Prophet(yearly_seasonality=True, weekly_seasonality=True)
-model.fit(trend_sales)
-sales_fit = model.predict(model.make_future_dataframe(periods=0))
-# %%
-# Extract and plot --> The trend is going down straightly
-trend = sales_fit[['ds','trend']]
-plot.plot(trend['ds'],trend['trend'],label = 'trend')
-# %%
-# Generate yearly column to double check --> Sales raised from 2015-2017 but in the trend chart 
-# it is straightly going down
-mmm_data['year'] = mmm_data['wk_strt_dt'].dt.year
-mmm_data.groupby('year')['sales'].sum()
-# %%
-# Seasonality component
-seasonal = sales_fit[['ds','yearly']]
-plot.plot(seasonal['ds'],seasonal['yearly'],label = 'seasonal')
-# %%
-# create adstock function
-def adstock(support,half_life):
-    decay = np.exp(np.log(0.5) / half_life)
-    num_period = support.shape[0]
-    adstock = np.zeros(num_period)
-    for i in range(num_period):
-        if i ==0 :
-            adstock[i] = (1.0 - decay) * support[i]
-        else:
-            adstock[i] = (1.0 - decay) * support[i] + decay * adstock[i-1]
-    return adstock
-# %%
-# Create Adstock variables
-for col in mdip_col:
-    new_col = 'ad_' + col
-    mmm_data[new_col] = adstock(mmm_data[col],1)
-# %%
-# check to see if it is working correctly
-check_column = ['mdip_dm','ad_mdip_dm']
-mmm_data[check_column]
-# %%
-# create s-curve function
-# Use hill function to capture, need to define half-saturation point and shape parameter
-# Input x is adstock, s is shape parameter and a is half saturation 
-def scrv_transformation(adstock,a,s):
-    num_period = adstock.shape[0]
-    scrv = np.zeros(num_period)
-    for i in range(num_period):
-        scrv[i] = 1/(1+(adstock[i]/a)**(-s))
-    return scrv
-# %%
-# Apply s-curve transformation to all adstock variables
-adstock_col = [col for col in mmm_data.columns if "ad_" in col]
-for col in adstock_col:
-    scrv_cols = 'scrv_'+col
-    mmm_data[scrv_cols] = scrv_transformation(mmm_data[col],0.5,1)
-# %%
-check_column_scrv = ['mdip_dm','ad_mdip_dm','scrv_ad_mdip_dm']
-mmm_data[check_column_scrv]
-# %%
-adstock = 2431942.50
-a = 2431942
-s = 0.5
-1/(1+(adstock/a)**(-s))
-# %%
-(adstock/a)**(-s)
-# a here is the half saturation impression, so need to check how to get the half saturation of each media channel
 # %%
 # Function to show media spend analysis
 def show_media_spend(data, date_col='wk_strt_dt', spend_cols=None, plot_type='all', figsize=(16, 10)):
@@ -388,7 +346,7 @@ class MMMModel:
         """
         self.alpha = alpha
         self.normalize = normalize
-        self.model = Ridge(alpha=alpha, normalize=normalize)
+        self.model = Ridge(alpha=alpha)
         self.scaler = StandardScaler() if normalize else None
         self.feature_names = []
         self.coefficients = None
@@ -866,17 +824,75 @@ class BudgetAllocator:
         return allocation
     
     def _calculate_roas(self, channel, budget):
-        """Calculate ROAS for a channel."""
-        # Simplified ROAS calculation
-        # In practice, this would use the response curve
-        return 2.0  # Placeholder
+        """
+        Calculate ROAS (Return on Ad Spend) for a channel.
+        ROAS = Incremental Revenue / Spend
+        
+        Parameters:
+        -----------
+        channel : str
+            Channel name
+        budget : float
+            Budget allocated to channel
+        
+        Returns:
+        --------
+        float : ROAS value
+        """
+        # Get current spend for the channel
+        current_spend = np.sum(self.media_data[channel])
+        n_weeks = len(self.media_data[channel])
+        
+        # Calculate response with zero spend (baseline)
+        zero_spend_media = self.media_data.copy()
+        zero_spend_media[channel] = np.zeros(n_weeks)
+        
+        # Calculate response with allocated budget
+        budget_spend_media = self.media_data.copy()
+        weekly_spend = budget / n_weeks
+        budget_spend_media[channel] = np.full(n_weeks, weekly_spend)
+        
+        # Transform both scenarios
+        def transform_media(media_dict):
+            X_list = []
+            for ch, data in media_dict.items():
+                if 'theta' in self.params:
+                    adstocked = adstock_geometric(data, self.params['theta'])
+                else:
+                    adstocked = adstock_weibull(data, self.params['shape'], self.params['scale'])
+                saturated = saturation_hill(adstocked, 
+                                          self.params['saturation_alpha'],
+                                          self.params['saturation_gamma'])
+                X_list.append(saturated.reshape(-1, 1))
+            X_media = np.hstack(X_list)
+            if self.base_vars_data is not None:
+                return np.hstack([X_media, self.base_vars_data])
+            return X_media
+        
+        X_zero = transform_media(zero_spend_media)
+        X_budget = transform_media(budget_spend_media)
+        
+        # Predict responses
+        pred_zero = self.model.predict(X_zero)
+        pred_budget = self.model.predict(X_budget)
+        
+        # Calculate incremental revenue
+        incremental_revenue = np.sum(pred_budget - pred_zero)
+        
+        # Calculate ROAS
+        if budget > 0:
+            roas = incremental_revenue / budget
+        else:
+            roas = 0.0
+        
+        return roas
 
 # %%
 # End-to-End MMM Workflow Function
 def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
                   media_spend_cols=None, base_vars=None,
                   adstock_type='geometric', trials=5, 
-                  optimize_hyperparams=True):
+                  optimize_hyperparams=True, train_test_split=0.8):
     """
     Run end-to-end MMM workflow following Robyn methodology.
     
@@ -898,6 +914,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         Number of optimization trials
     optimize_hyperparams : bool
         Whether to optimize hyperparameters
+    train_test_split : float
+        Proportion of data for training (default 0.8)
     
     Returns:
     --------
@@ -908,7 +926,7 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     print("="*80)
     
     # 1. Prepare data
-    print("\n[1/7] Preparing data...")
+    print("\n[1/8] Preparing data...")
     if media_spend_cols is None:
         media_spend_cols = [col for col in data.columns if "mdsp_" in col]
     
@@ -916,29 +934,43 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         base_vars = [col for col in data.columns if any(prefix in col 
                    for prefix in ['me_', 'hldy_', 'seas_', 'st_', 'mkrdn_'])]
     
-    # Extract media data
-    media_data = {}
+    # Chronological train/test split
+    split_point = int(len(data) * train_test_split)
+    train_data = data.iloc[:split_point].copy()
+    test_data = data.iloc[split_point:].copy()
+    
+    # Extract media data for training
+    media_data_train = {}
     for col in media_spend_cols:
         channel_name = col.replace('mdsp_', '')
-        media_data[channel_name] = data[col].values
+        media_data_train[channel_name] = train_data[col].values
     
-    # Extract target and baseline
-    target = data[dep_var].values
-    base_vars_array = data[base_vars].values if len(base_vars) > 0 else None
+    # Extract target and baseline for training
+    target_train = train_data[dep_var].values
+    base_vars_array_train = train_data[base_vars].values if len(base_vars) > 0 else None
     
-    print(f"  - Media channels: {list(media_data.keys())}")
+    # Extract test data
+    media_data_test = {}
+    for col in media_spend_cols:
+        channel_name = col.replace('mdsp_', '')
+        media_data_test[channel_name] = test_data[col].values
+    target_test = test_data[dep_var].values
+    base_vars_array_test = test_data[base_vars].values if len(base_vars) > 0 else None
+    
+    print(f"  - Media channels: {list(media_data_train.keys())}")
     print(f"  - Baseline variables: {len(base_vars)}")
-    print(f"  - Data points: {len(data)}")
+    print(f"  - Training data points: {len(train_data)}")
+    print(f"  - Test data points: {len(test_data)}")
     
-    # 2. Optimize hyperparameters
-    print("\n[2/7] Optimizing hyperparameters...")
+    # 2. Optimize hyperparameters (on training data only)
+    print("\n[2/8] Optimizing hyperparameters...")
     if optimize_hyperparams:
         optimizer = MMMOptimizer(adstock_type=adstock_type)
         best_params = optimizer.optimize(
-            media_data, target, base_vars_array,
+            media_data_train, target_train, base_vars_array_train,
             maxiter=30, popsize=10
         )
-        print(f"  - Best NRMSE: {best_params['nrmse']:.4f}")
+        print(f"  - Best NRMSE (train): {best_params['nrmse']:.4f}")
         print(f"  - Parameters: {best_params}")
     else:
         # Use default parameters
@@ -949,10 +981,10 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
             best_params = {'shape': 1.0, 'scale': 1.0, 'ridge_alpha': 1.0,
                           'saturation_alpha': 1.0, 'saturation_gamma': 1.0}
     
-    # 3. Transform media variables
-    print("\n[3/7] Transforming media variables...")
-    X_list = []
-    for channel, channel_data in media_data.items():
+    # 3. Transform media variables (training)
+    print("\n[3/8] Transforming media variables...")
+    X_list_train = []
+    for channel, channel_data in media_data_train.items():
         # Apply adstock
         if adstock_type == 'geometric':
             adstocked = adstock_geometric(channel_data, best_params['theta'])
@@ -965,51 +997,153 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         saturated = saturation_hill(adstocked, 
                                    best_params['saturation_alpha'],
                                    best_params['saturation_gamma'])
-        X_list.append(saturated.reshape(-1, 1))
+        X_list_train.append(saturated.reshape(-1, 1))
     
-    X_media = np.hstack(X_list)
-    if base_vars_array is not None:
-        X = np.hstack([X_media, base_vars_array])
+    X_media_train = np.hstack(X_list_train)
+    if base_vars_array_train is not None:
+        X_train = np.hstack([X_media_train, base_vars_array_train])
     else:
-        X = X_media
+        X_train = X_media_train
+    
+    # Transform test data
+    X_list_test = []
+    for channel, channel_data in media_data_test.items():
+        if adstock_type == 'geometric':
+            adstocked = adstock_geometric(channel_data, best_params['theta'])
+        else:
+            adstocked = adstock_weibull(channel_data, 
+                                      best_params['shape'], 
+                                      best_params['scale'])
+        saturated = saturation_hill(adstocked, 
+                                   best_params['saturation_alpha'],
+                                   best_params['saturation_gamma'])
+        X_list_test.append(saturated.reshape(-1, 1))
+    
+    X_media_test = np.hstack(X_list_test)
+    if base_vars_array_test is not None:
+        X_test = np.hstack([X_media_test, base_vars_array_test])
+    else:
+        X_test = X_media_test
     
     # 4. Fit model
-    print("\n[4/7] Fitting MMM model...")
+    print("\n[4/8] Fitting MMM model...")
     model = MMMModel(alpha=best_params['ridge_alpha'], normalize=True)
-    model.fit(X, target)
-    y_pred = model.predict(X)
+    model.fit(X_train, target_train)
+    y_pred_train = model.predict(X_train)
+    y_pred_test = model.predict(X_test)
     
-    # Calculate metrics
-    rmse = np.sqrt(mean_squared_error(target, y_pred))
-    nrmse = rmse / (np.max(target) - np.min(target))
-    r2 = r2_score(target, y_pred)
-    mae = mean_absolute_error(target, y_pred)
+    # Calculate metrics (training)
+    rmse_train = np.sqrt(mean_squared_error(target_train, y_pred_train))
+    nrmse_train = rmse_train / (np.max(target_train) - np.min(target_train) + 1e-10)
+    r2_train = r2_score(target_train, y_pred_train)
+    mae_train = mean_absolute_error(target_train, y_pred_train)
     
-    print(f"  - R²: {r2:.4f}")
-    print(f"  - NRMSE: {nrmse:.4f}")
-    print(f"  - RMSE: {rmse:.2f}")
-    print(f"  - MAE: {mae:.2f}")
+    # Calculate metrics (test)
+    rmse_test = np.sqrt(mean_squared_error(target_test, y_pred_test))
+    nrmse_test = rmse_test / (np.max(target_test) - np.min(target_test) + 1e-10)
+    r2_test = r2_score(target_test, y_pred_test)
+    mae_test = mean_absolute_error(target_test, y_pred_test)
+    mape_test = np.mean(np.abs((target_test - y_pred_test) / (target_test + 1e-10))) * 100
     
-    # 5. Model diagnostics
-    print("\n[5/7] Generating model diagnostics...")
+    print(f"\n  Training Metrics:")
+    print(f"    - R²: {r2_train:.4f}")
+    print(f"    - NRMSE: {nrmse_train:.4f}")
+    print(f"    - RMSE: {rmse_train:.2f}")
+    print(f"    - MAE: {mae_train:.2f}")
+    print(f"\n  Test Metrics:")
+    print(f"    - R²: {r2_test:.4f}")
+    print(f"    - NRMSE: {nrmse_test:.4f}")
+    print(f"    - RMSE: {rmse_test:.2f}")
+    print(f"    - MAE: {mae_test:.2f}")
+    print(f"    - MAPE: {mape_test:.2f}%")
     
-    # Plot actual vs predicted
-    plot.figure(figsize=(14, 5))
+    # 5. Contribution Decomposition
+    print("\n[5/8] Calculating contribution decomposition...")
     
-    plot.subplot(1, 2, 1)
-    plot.scatter(target, y_pred, alpha=0.6)
-    plot.plot([target.min(), target.max()], [target.min(), target.max()], 
+    def decompose_contributions(model, X_media, X_base, media_names, base_names):
+        """Decompose predictions into baseline and media contributions."""
+        # Baseline contribution (intercept + control variables)
+        if X_base is not None and len(X_base.shape) > 1:
+            n_base = X_base.shape[1]
+            base_contrib = model.intercept + np.sum(X_base * model.coefficients[-n_base:], axis=1)
+        else:
+            base_contrib = np.full(len(X_media), model.intercept)
+        
+        # Media contributions by channel
+        media_contribs = {}
+        n_media = len(media_names)
+        for i, channel in enumerate(media_names):
+            media_contribs[channel] = X_media[:, i] * model.coefficients[i]
+        
+        # Total prediction
+        total_pred = base_contrib + np.sum([media_contribs[ch] for ch in media_names], axis=0)
+        
+        return {
+            'baseline': base_contrib,
+            'media': media_contribs,
+            'total': total_pred
+        }
+    
+    # Decompose for training and test
+    decomposition_train = decompose_contributions(
+        model, X_media_train, base_vars_array_train, 
+        list(media_data_train.keys()), base_vars
+    )
+    decomposition_test = decompose_contributions(
+        model, X_media_test, base_vars_array_test,
+        list(media_data_test.keys()), base_vars
+    )
+    
+    # Print contribution summary
+    print("\n  Average Contributions (Training):")
+    print(f"    Baseline: {np.mean(decomposition_train['baseline']):.2f}")
+    for channel in media_data_train.keys():
+        print(f"    {channel}: {np.mean(decomposition_train['media'][channel]):.2f}")
+    
+    # 6. Model diagnostics and residual analysis
+    print("\n[6/8] Generating model diagnostics and residual analysis...")
+    
+    # Plot actual vs predicted (train and test)
+    plot.figure(figsize=(16, 6))
+    
+    plot.subplot(1, 3, 1)
+    plot.scatter(target_train, y_pred_train, alpha=0.6, label='Train', s=30)
+    plot.scatter(target_test, y_pred_test, alpha=0.6, label='Test', s=30, marker='^')
+    plot.plot([min(target_train.min(), target_test.min()), 
+               max(target_train.max(), target_test.max())], 
+             [min(target_train.min(), target_test.min()), 
+              max(target_train.max(), target_test.max())], 
              'r--', lw=2, label='Perfect Prediction')
     plot.xlabel('Actual Sales', fontsize=11)
     plot.ylabel('Predicted Sales', fontsize=11)
-    plot.title(f'Actual vs Predicted (R² = {r2:.3f})', fontsize=12, fontweight='bold')
+    plot.title(f'Actual vs Predicted\nTrain R²={r2_train:.3f}, Test R²={r2_test:.3f}', 
+               fontsize=12, fontweight='bold')
     plot.legend()
     plot.grid(True, alpha=0.3)
     
-    # Plot time series
-    plot.subplot(1, 2, 2)
-    plot.plot(data[date_col], target, label='Actual', linewidth=2, alpha=0.7)
-    plot.plot(data[date_col], y_pred, label='Predicted', linewidth=2, alpha=0.7)
+    # Residuals plot
+    residuals_train = target_train - y_pred_train
+    residuals_test = target_test - y_pred_test
+    
+    plot.subplot(1, 3, 2)
+    plot.scatter(y_pred_train, residuals_train, alpha=0.6, label='Train', s=30)
+    plot.scatter(y_pred_test, residuals_test, alpha=0.6, label='Test', s=30, marker='^')
+    plot.axhline(y=0, color='r', linestyle='--', linewidth=2)
+    plot.xlabel('Predicted Sales', fontsize=11)
+    plot.ylabel('Residuals', fontsize=11)
+    plot.title('Residuals vs Predicted', fontsize=12, fontweight='bold')
+    plot.legend()
+    plot.grid(True, alpha=0.3)
+    
+    # Time series plot
+    plot.subplot(1, 3, 3)
+    all_dates = pd.concat([train_data[date_col], test_data[date_col]])
+    all_actual = np.concatenate([target_train, target_test])
+    all_pred = np.concatenate([y_pred_train, y_pred_test])
+    plot.plot(all_dates, all_actual, label='Actual', linewidth=2, alpha=0.7)
+    plot.plot(all_dates, all_pred, label='Predicted', linewidth=2, alpha=0.7)
+    plot.axvline(x=train_data[date_col].iloc[-1], color='g', linestyle='--', 
+                linewidth=1, label='Train/Test Split')
     plot.xlabel('Date', fontsize=11)
     plot.ylabel('Sales', fontsize=11)
     plot.title('Time Series: Actual vs Predicted', fontsize=12, fontweight='bold')
@@ -1019,17 +1153,32 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     plot.tight_layout()
     plot.show()
     
-    # 6. Response curves
-    print("\n[6/7] Generating response curves...")
+    # Q-Q plot for residuals
+    plot.figure(figsize=(12, 5))
+    
+    plot.subplot(1, 2, 1)
+    stats.probplot(residuals_train, dist="norm", plot=plot)
+    plot.title('Q-Q Plot: Training Residuals', fontsize=12, fontweight='bold')
+    plot.grid(True, alpha=0.3)
+    
+    plot.subplot(1, 2, 2)
+    stats.probplot(residuals_test, dist="norm", plot=plot)
+    plot.title('Q-Q Plot: Test Residuals', fontsize=12, fontweight='bold')
+    plot.grid(True, alpha=0.3)
+    plot.tight_layout()
+    plot.show()
+    
+    # 7. Response curves
+    print("\n[7/8] Generating response curves...")
     response_curves = {}
-    n_channels = len(media_data)
+    n_channels = len(media_data_train)
     rows = (n_channels + 1) // 2
     cols = 2 if n_channels > 1 else 1
     
     plot.figure(figsize=(14, 4 * rows))
-    for idx, channel in enumerate(media_data.keys(), 1):
+    for idx, channel in enumerate(media_data_train.keys(), 1):
         spend_range, responses = generate_response_curves(
-            model, media_data, base_vars_array, channel, best_params
+            model, media_data_train, base_vars_array_train, channel, best_params
         )
         response_curves[channel] = (spend_range, responses)
         
@@ -1043,32 +1192,56 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     plot.tight_layout()
     plot.show()
     
-    # 7. Budget allocation example
-    print("\n[7/7] Budget allocation example...")
-    allocator = BudgetAllocator(model, media_data, base_vars_array, best_params)
-    total_budget = sum([data[col].sum() for col in media_spend_cols])
+    # 8. Budget allocation example
+    print("\n[8/8] Budget allocation example...")
+    allocator = BudgetAllocator(model, media_data_train, base_vars_array_train, best_params)
+    total_budget = sum([train_data[col].sum() for col in media_spend_cols])
     allocation = allocator.allocate_budget(total_budget)
     
     print("\nOptimal Budget Allocation:")
-    print("-" * 60)
+    print("-" * 80)
+    print(f"{'Channel':20s} | {'Budget':>15s} | {'Share':>8s} | {'ROAS':>10s}")
+    print("-" * 80)
     for channel, alloc in allocation.items():
-        print(f"{channel:20s} | Budget: ${alloc['budget']:>12,.0f} | Share: {alloc['share']*100:>5.1f}%")
+        print(f"{channel:20s} | ${alloc['budget']:>13,.0f} | {alloc['share']*100:>6.1f}% | {alloc['roas']:>9.2f}")
     
     # Compile results
     results = {
         'model': model,
         'params': best_params,
         'metrics': {
-            'r2': r2,
-            'nrmse': nrmse,
-            'rmse': rmse,
-            'mae': mae
+            'train': {
+                'r2': r2_train,
+                'nrmse': nrmse_train,
+                'rmse': rmse_train,
+                'mae': mae_train
+            },
+            'test': {
+                'r2': r2_test,
+                'nrmse': nrmse_test,
+                'rmse': rmse_test,
+                'mae': mae_test,
+                'mape': mape_test
+            }
         },
-        'predictions': y_pred,
+        'predictions': {
+            'train': y_pred_train,
+            'test': y_pred_test
+        },
+        'actual': {
+            'train': target_train,
+            'test': target_test
+        },
+        'decomposition': {
+            'train': decomposition_train,
+            'test': decomposition_test
+        },
         'response_curves': response_curves,
         'budget_allocation': allocation,
-        'feature_names': list(media_data.keys()) + base_vars,
-        'coefficients': model.coefficients
+        'feature_names': list(media_data_train.keys()) + base_vars,
+        'coefficients': model.coefficients,
+        'train_data': train_data,
+        'test_data': test_data
     }
     
     print("\n" + "="*80)
@@ -1086,57 +1259,447 @@ mmm_results = run_robyn_mmm(
     dep_var='sales',
     media_spend_cols=mdsp_col,
     base_vars=base_vars,
-    adstock_type='geometric',
+    adstock_type=ADSTOCK_TYPE,
     trials=5,
-    optimize_hyperparams=True
+    optimize_hyperparams=OPTIMIZE_HYPERPARAMS,
+    train_test_split=TRAIN_TEST_SPLIT
 )
 
 # %%
 # ============================================================================
-# BASELINE MMM USING OLS (Alternative approach)
+# BASELINE MMM USING OLS (Alternative approach for comparison)
 # ============================================================================
-# We will need to find a way to derive half saturation point here
-# %%
 # Baseline MMM using OLS on raw spend and control variables
-media_cols_baseline = ['mdsp_vidtr', 'mdsp_dm', 'mdsp_inst']
-control_cols_baseline = ['me_ics_all', 'st_ct']
+# Uses subset of media channels and control variables for simplicity
+
+# Select subset of media channels (use first 3 if available, otherwise all)
+if len(mdsp_col) >= 3:
+    media_cols_baseline = mdsp_col[:3]
+else:
+    media_cols_baseline = mdsp_col
+
+# Select subset of control variables (use first 2 if available)
+if len(base_vars) >= 2:
+    control_cols_baseline = base_vars[:2]
+else:
+    control_cols_baseline = base_vars if len(base_vars) > 0 else []
+
+print("\n" + "="*80)
+print("BASELINE OLS MMM")
+print("="*80)
+print(f"Media channels: {[col.replace('mdsp_', '') for col in media_cols_baseline]}")
+print(f"Control variables: {control_cols_baseline}")
 
 # Log-transform sales and features to stabilize variance
 model_data = mmm_data.copy()
-model_data['sales'] = np.log1p(model_data['sales'])
+model_data['sales_log'] = np.log1p(model_data['sales'])
 for col in media_cols_baseline + control_cols_baseline:
-    model_data[col] = np.log1p(model_data[col])
+    model_data[f'{col}_log'] = np.log1p(model_data[col])
 
-# Chronological train/test split
-split_point = int(len(model_data) * 0.8)
-train = model_data.iloc[:split_point]
-test = model_data.iloc[split_point:]
+# Chronological train/test split (same split as Robyn model)
+split_point = int(len(model_data) * TRAIN_TEST_SPLIT)
+train_baseline = model_data.iloc[:split_point]
+test_baseline = model_data.iloc[split_point:]
+
+# Prepare features
+feature_cols = [f'{col}_log' for col in media_cols_baseline + control_cols_baseline]
 
 # Fit simple linear regression
-X_train = sm.add_constant(train[media_cols_baseline + control_cols_baseline])
-y_train = train['sales']
-baseline_model = sm.OLS(y_train, X_train).fit()
+X_train_baseline = sm.add_constant(train_baseline[feature_cols])
+y_train_baseline = train_baseline['sales_log']
+baseline_ols_model = sm.OLS(y_train_baseline, X_train_baseline).fit()
 
 # Evaluate on holdout set
-X_test = sm.add_constant(test[media_cols_baseline + control_cols_baseline])
-y_test = test['sales']
-y_pred = baseline_model.predict(X_test)
-rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
-mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+X_test_baseline = sm.add_constant(test_baseline[feature_cols])
+y_test_baseline = test_baseline['sales_log']
+y_pred_baseline_log = baseline_ols_model.predict(X_test_baseline)
 
-print(baseline_model.summary())
-print(f"RMSE: {rmse:.2f}")
-print(f"MAPE: {mape:.2f}%")
+# Convert back from log space
+y_pred_baseline = np.expm1(y_pred_baseline_log)
+y_test_baseline_actual = test_baseline['sales'].values
+
+# Calculate metrics
+rmse_baseline = np.sqrt(np.mean((y_test_baseline_actual - y_pred_baseline) ** 2))
+mape_baseline = np.mean(np.abs((y_test_baseline_actual - y_pred_baseline) / (y_test_baseline_actual + 1e-10))) * 100
+r2_baseline = r2_score(y_test_baseline_actual, y_pred_baseline)
+mae_baseline = mean_absolute_error(y_test_baseline_actual, y_pred_baseline)
+
+print("\nBaseline OLS Model Summary:")
+print(baseline_ols_model.summary())
+print(f"\nTest Set Metrics:")
+print(f"  R²: {r2_baseline:.4f}")
+print(f"  RMSE: {rmse_baseline:.2f}")
+print(f"  MAE: {mae_baseline:.2f}")
+print(f"  MAPE: {mape_baseline:.2f}%")
 
 # Plot actual vs predicted sales
 plot.figure(figsize=(12,6))
-plot.plot(test['wk_strt_dt'], np.expm1(y_test), label='Actual')
-plot.plot(test['wk_strt_dt'], np.expm1(y_pred), label='Predicted')
+plot.plot(test_baseline['wk_strt_dt'], y_test_baseline_actual, label='Actual', linewidth=2, alpha=0.7)
+plot.plot(test_baseline['wk_strt_dt'], y_pred_baseline, label='Predicted', linewidth=2, alpha=0.7)
 plot.legend()
-plot.xlabel('Date')
-plot.ylabel('Sales')
-plot.title('Baseline OLS Model: Actual vs Predicted Sales')
+plot.xlabel('Date', fontsize=12)
+plot.ylabel('Sales', fontsize=12)
+plot.title(f'Baseline OLS Model: Actual vs Predicted Sales (R² = {r2_baseline:.3f})', 
+           fontsize=13, fontweight='bold')
 plot.grid(True, alpha=0.3)
 plot.xticks(rotation=45)
 plot.tight_layout()
 plot.show()
+
+# %%
+# ============================================================================
+# MODEL COMPARISON
+# ============================================================================
+print("\n" + "="*80)
+print("MODEL COMPARISON: Robyn MMM vs Baseline OLS")
+print("="*80)
+
+comparison_df = pd.DataFrame({
+    'Metric': ['R²', 'RMSE', 'MAE', 'MAPE (%)'],
+    'Robyn MMM (Test)': [
+        mmm_results['metrics']['test']['r2'],
+        mmm_results['metrics']['test']['rmse'],
+        mmm_results['metrics']['test']['mae'],
+        mmm_results['metrics']['test']['mape']
+    ],
+    'Baseline OLS (Test)': [
+        r2_baseline,
+        rmse_baseline,
+        mae_baseline,
+        mape_baseline
+    ]
+})
+
+comparison_df['Improvement'] = ((comparison_df['Baseline OLS (Test)'] - 
+                                  comparison_df['Robyn MMM (Test)']) / 
+                                 comparison_df['Baseline OLS (Test)'] * 100)
+comparison_df['Improvement'] = comparison_df['Improvement'].apply(
+    lambda x: f"{x:.1f}%" if not pd.isna(x) else "N/A"
+)
+
+# For R², improvement is positive if Robyn is higher
+comparison_df.loc[0, 'Improvement'] = (
+    f"{(mmm_results['metrics']['test']['r2'] - r2_baseline) / r2_baseline * 100:.1f}%"
+    if r2_baseline > 0 else "N/A"
+)
+
+print("\n" + comparison_df.to_string(index=False))
+print("\n" + "="*80)
+
+# %%
+# ============================================================================
+# MEDIA CHANNEL METRICS SUMMARY BY YEAR
+# ============================================================================
+print("\n" + "="*80)
+print("CALCULATING MEDIA CHANNEL METRICS BY YEAR")
+print("="*80)
+
+def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt', 
+                                     dep_var='sales', media_spend_cols=None, 
+                                     media_impression_cols=None):
+    """
+    Calculate comprehensive metrics for each media channel by year.
+    
+    Metrics calculated:
+    - Spend: Total spend per channel per year
+    - Impressions: Total impressions per channel per year
+    - ROAS: Return on Ad Spend (Incremental Revenue / Spend)
+    - CPM: Cost Per Mille (Spend / Impressions * 1000)
+    - Effectiveness: Incremental Revenue per Impression
+    - Due-to Contribution: Media contribution from model decomposition
+    
+    Parameters:
+    -----------
+    data : pandas.DataFrame
+        Full dataset with dates, spend, impressions, and sales
+    mmm_results : dict
+        Results from run_robyn_mmm function
+    date_col : str
+        Date column name
+    dep_var : str
+        Dependent variable (sales)
+    media_spend_cols : list
+        Media spend column names
+    media_impression_cols : list
+        Media impression column names
+    
+    Returns:
+    --------
+    pandas.DataFrame : Summary table with metrics by channel and year
+    """
+    # Auto-detect columns if not provided
+    if media_spend_cols is None:
+        media_spend_cols = [col for col in data.columns if "mdsp_" in col]
+    if media_impression_cols is None:
+        media_impression_cols = [col for col in data.columns if "mdip_" in col]
+    
+    # Ensure date is datetime
+    data = data.copy()
+    data[date_col] = pd.to_datetime(data[date_col])
+    data['year'] = data[date_col].dt.year
+    
+    # Get model and parameters
+    model = mmm_results['model']
+    params = mmm_results['params']
+    
+    # Get all data (train + test) for model decomposition
+    # We'll use this for calculating due-to contributions
+    all_data = pd.concat([mmm_results['train_data'], mmm_results['test_data']])
+    all_data[date_col] = pd.to_datetime(all_data[date_col])
+    all_data['year'] = all_data[date_col].dt.year
+    
+    # Align data indices - we need to match rows between full data and train+test
+    # For spend/impressions, use full data; for decomposition, use train+test data
+    # Create a mapping based on dates
+    all_data['date_key'] = all_data[date_col].dt.strftime('%Y-%m-%d')
+    data['date_key'] = data[date_col].dt.strftime('%Y-%m-%d')
+    
+    # Get decomposition for all data
+    # We need to transform all data and get contributions
+    media_data_all = {}
+    for col in media_spend_cols:
+        channel_name = col.replace('mdsp_', '')
+        media_data_all[channel_name] = all_data[col].values
+    
+    # Transform all media data
+    X_list_all = []
+    for channel, channel_data in media_data_all.items():
+        if 'theta' in params:
+            adstocked = adstock_geometric(channel_data, params['theta'])
+        else:
+            adstocked = adstock_weibull(channel_data, params['shape'], params['scale'])
+        saturated = saturation_hill(adstocked, 
+                                   params['saturation_alpha'],
+                                   params['saturation_gamma'])
+        X_list_all.append(saturated.reshape(-1, 1))
+    
+    X_media_all = np.hstack(X_list_all)
+    
+    # Get base variables
+    base_vars_list = mmm_results['feature_names'][len(media_data_all):] if \
+        len(mmm_results['feature_names']) > len(media_data_all) else []
+    
+    if len(base_vars_list) > 0:
+        base_vars_array_all = all_data[base_vars_list].values
+        X_all = np.hstack([X_media_all, base_vars_array_all])
+    else:
+        base_vars_array_all = None
+        X_all = X_media_all
+    
+    # Define decomposition function (same as in run_robyn_mmm)
+    def decompose_contributions(model, X_media, X_base, media_names, base_names):
+        """Decompose predictions into baseline and media contributions."""
+        # Baseline contribution (intercept + control variables)
+        if X_base is not None and len(X_base.shape) > 1:
+            n_base = X_base.shape[1]
+            base_contrib = model.intercept + np.sum(X_base * model.coefficients[-n_base:], axis=1)
+        else:
+            base_contrib = np.full(len(X_media), model.intercept)
+        
+        # Media contributions by channel
+        media_contribs = {}
+        n_media = len(media_names)
+        for i, channel in enumerate(media_names):
+            media_contribs[channel] = X_media[:, i] * model.coefficients[i]
+        
+        # Total prediction
+        total_pred = base_contrib + np.sum([media_contribs[ch] for ch in media_names], axis=0)
+        
+        return {
+            'baseline': base_contrib,
+            'media': media_contribs,
+            'total': total_pred
+        }
+    
+    # Get decomposition for all data
+    decomposition_all = decompose_contributions(
+        model, X_media_all, base_vars_array_all,
+        list(media_data_all.keys()), 
+        base_vars_list
+    )
+    
+    # Calculate metrics by channel and year
+    summary_rows = []
+    
+    for year in sorted(data['year'].unique()):
+        # Use full data for spend and impressions
+        year_data_full = data[data['year'] == year].copy()
+        
+        # Use train+test data for decomposition (only if year exists in train+test)
+        year_mask_all = all_data['year'] == year
+        year_data_model = all_data[year_mask_all].copy()
+        year_indices = np.where(year_mask_all)[0] if year_mask_all.any() else np.array([])
+        
+        for i, col in enumerate(media_spend_cols):
+            channel_name = col.replace('mdsp_', '')
+            
+            # Get corresponding impression column
+            imp_col = col.replace('mdsp_', 'mdip_')
+            if imp_col not in media_impression_cols:
+                # Try to find matching impression column
+                imp_col = None
+                for imp in media_impression_cols:
+                    if imp.replace('mdip_', '') == channel_name:
+                        imp_col = imp
+                        break
+            
+            # Calculate spend from full data
+            spend = year_data_full[col].sum()
+            
+            # Calculate impressions from full data
+            if imp_col and imp_col in year_data_full.columns:
+                impressions = year_data_full[imp_col].sum()
+            else:
+                impressions = np.nan
+            
+            # Calculate due-to contribution (media contribution from decomposition)
+            # Only calculate if we have model data for this year
+            if len(year_indices) > 0 and channel_name in decomposition_all['media']:
+                due_to = decomposition_all['media'][channel_name][year_indices].sum()
+            else:
+                # If no model data for this year, estimate based on spend and average ROAS
+                # This is a fallback - ideally all years should be in train+test
+                due_to = 0.0
+            
+            # Calculate ROAS (Incremental Revenue / Spend)
+            # ROAS = Due-to / Spend
+            if spend > 0:
+                roas = due_to / spend
+            else:
+                roas = 0.0
+            
+            # Calculate CPM (Cost Per Mille = Spend / Impressions * 1000)
+            if impressions > 0 and not np.isnan(impressions):
+                cpm = (spend / impressions) * 1000
+            else:
+                cpm = np.nan
+            
+            # Calculate Effectiveness (Incremental Revenue per Impression)
+            # Effectiveness = Due-to / Impressions
+            if impressions > 0 and not np.isnan(impressions):
+                effectiveness = due_to / impressions
+            else:
+                effectiveness = np.nan
+            
+            summary_rows.append({
+                'Year': year,
+                'Channel': channel_name,
+                'Spend': spend,
+                'Impressions': impressions if not np.isnan(impressions) else 0,
+                'ROAS': roas,
+                'CPM': cpm if not np.isnan(cpm) else 0,
+                'Effectiveness': effectiveness if not np.isnan(effectiveness) else 0,
+                'Due-to Contribution': due_to
+            })
+    
+    summary_df = pd.DataFrame(summary_rows)
+    
+    return summary_df
+
+# Calculate metrics
+channel_metrics = calculate_channel_metrics_by_year(
+    mmm_data,
+    mmm_results,
+    date_col='wk_strt_dt',
+    dep_var='sales',
+    media_spend_cols=mdsp_col,
+    media_impression_cols=mdip_col
+)
+
+# Format and display summary table
+print("\n" + "="*80)
+print("MEDIA CHANNEL METRICS SUMMARY BY YEAR")
+print("="*80)
+
+# Format the table for better readability
+formatted_metrics = channel_metrics.copy()
+formatted_metrics['Spend'] = formatted_metrics['Spend'].apply(lambda x: f"${x:,.0f}")
+formatted_metrics['Impressions'] = formatted_metrics['Impressions'].apply(
+    lambda x: f"{x:,.0f}" if not pd.isna(x) and x > 0 else "N/A"
+)
+formatted_metrics['ROAS'] = formatted_metrics['ROAS'].apply(lambda x: f"{x:.2f}")
+formatted_metrics['CPM'] = formatted_metrics['CPM'].apply(
+    lambda x: f"${x:.2f}" if not pd.isna(x) and x > 0 else "N/A"
+)
+formatted_metrics['Effectiveness'] = formatted_metrics['Effectiveness'].apply(
+    lambda x: f"${x:.4f}" if not pd.isna(x) and x != 0 else "N/A"
+)
+formatted_metrics['Due-to Contribution'] = formatted_metrics['Due-to Contribution'].apply(
+    lambda x: f"${x:,.0f}"
+)
+
+# Display by year
+for year in sorted(channel_metrics['Year'].unique()):
+    year_data = formatted_metrics[formatted_metrics['Year'] == year]
+    print(f"\n{'='*100}")
+    print(f"YEAR {year}")
+    print(f"{'='*100}")
+    print(year_data[['Channel', 'Spend', 'Impressions', 'ROAS', 'CPM', 
+                      'Effectiveness', 'Due-to Contribution']].to_string(index=False))
+
+# Also create a pivot table for easier comparison
+print("\n" + "="*100)
+print("SUMMARY TABLE - ALL YEARS")
+print("="*100)
+
+# Create pivot tables for key metrics
+pivot_spend = channel_metrics.pivot_table(
+    index='Channel', columns='Year', values='Spend', aggfunc='sum', fill_value=0
+)
+pivot_roas = channel_metrics.pivot_table(
+    index='Channel', columns='Year', values='ROAS', aggfunc='mean', fill_value=0
+)
+pivot_due_to = channel_metrics.pivot_table(
+    index='Channel', columns='Year', values='Due-to Contribution', aggfunc='sum', fill_value=0
+)
+
+print("\nTotal Spend by Channel and Year:")
+print("-" * 100)
+print(pivot_spend.applymap(lambda x: f"${x:,.0f}"))
+
+print("\nAverage ROAS by Channel and Year:")
+print("-" * 100)
+print(pivot_roas.applymap(lambda x: f"{x:.2f}"))
+
+print("\nTotal Due-to Contribution by Channel and Year:")
+print("-" * 100)
+print(pivot_due_to.applymap(lambda x: f"${x:,.0f}"))
+
+# Calculate totals across all years
+print("\n" + "="*100)
+print("TOTALS ACROSS ALL YEARS")
+print("="*100)
+totals = channel_metrics.groupby('Channel').agg({
+    'Spend': 'sum',
+    'Impressions': 'sum',
+    'Due-to Contribution': 'sum'
+}).reset_index()
+
+totals['ROAS'] = totals['Due-to Contribution'] / totals['Spend']
+totals['CPM'] = (totals['Spend'] / totals['Impressions'] * 1000).replace([np.inf, -np.inf], np.nan)
+totals['Effectiveness'] = (totals['Due-to Contribution'] / totals['Impressions']).replace(
+    [np.inf, -np.inf], np.nan
+)
+
+totals_display = totals.copy()
+totals_display['Spend'] = totals_display['Spend'].apply(lambda x: f"${x:,.0f}")
+totals_display['Impressions'] = totals_display['Impressions'].apply(lambda x: f"{x:,.0f}")
+totals_display['ROAS'] = totals_display['ROAS'].apply(lambda x: f"{x:.2f}")
+totals_display['CPM'] = totals_display['CPM'].apply(
+    lambda x: f"${x:.2f}" if not pd.isna(x) else "N/A"
+)
+totals_display['Effectiveness'] = totals_display['Effectiveness'].apply(
+    lambda x: f"${x:.4f}" if not pd.isna(x) else "N/A"
+)
+totals_display['Due-to Contribution'] = totals_display['Due-to Contribution'].apply(
+    lambda x: f"${x:,.0f}"
+)
+
+print("\n" + totals_display.to_string(index=False))
+print("\n" + "="*100)
+
+# Save to CSV for further analysis
+channel_metrics.to_csv('media_channel_metrics_by_year.csv', index=False)
+print("\nMetrics saved to 'media_channel_metrics_by_year.csv'")
+
+# %%
