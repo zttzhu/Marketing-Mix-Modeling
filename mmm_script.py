@@ -20,6 +20,12 @@ OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
 ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
 OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
 
+# CSV Export configuration
+EXPORT_CSV = True  # Set to False to skip CSV export
+EXPORT_DIR = None  # Set to None for current directory, or specify path like 'outputs/' or 'C:/Users/YourName/Downloads/'
+ADD_TIMESTAMP = False  # Set to True to add timestamp to filename
+SAVE_TO_DOWNLOADS = True  # Set to True to also save a copy to Downloads folder
+
 print("="*80)
 print("MARKETING MIX MODELING - CONFIGURATION")
 print("="*80)
@@ -40,6 +46,8 @@ from scipy.optimize import differential_evolution, minimize
 from scipy import stats
 import warnings
 import statsmodels.api as sm
+import os
+from datetime import datetime
 warnings.filterwarnings('ignore')
 pd.set_option('display.float_format', '{:.2f}'.format)
 
