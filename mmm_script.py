@@ -20,12 +20,6 @@ OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
 ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
 OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
 
-# CSV Export configuration
-EXPORT_CSV = True  # Set to False to skip CSV export
-EXPORT_DIR = None  # Set to None for current directory, or specify path like 'outputs/' or 'C:/Users/YourName/Downloads/'
-ADD_TIMESTAMP = False  # Set to True to add timestamp to filename
-SAVE_TO_DOWNLOADS = True  # Set to True to also save a copy to Downloads folder
-
 print("="*80)
 print("MARKETING MIX MODELING - CONFIGURATION")
 print("="*80)
@@ -341,7 +335,7 @@ class MMMModel:
     Uses Ridge regression with adstock and saturation transformations.
     """
     
-    def __init__(self, alpha=1.0, normalize=True):
+    def __init__(self, alpha=1.0, normalize=True, positive=True):
         """
         Initialize MMM model.
         
@@ -354,7 +348,10 @@ class MMMModel:
         """
         self.alpha = alpha
         self.normalize = normalize
-        self.model = Ridge(alpha=alpha)
+        # Enforce non-negative media coefficients to avoid impossible negative ROAS
+        # (media variables are expected to have non-negative incremental contribution).
+        self.positive = positive
+        self.model = Ridge(alpha=alpha, positive=positive)
         self.scaler = StandardScaler() if normalize else None
         self.feature_names = []
         self.coefficients = None
@@ -741,6 +738,30 @@ class BudgetAllocator:
         self.base_vars_data = base_vars_data
         self.params = params
         self.channel_names = list(media_data.keys())
+
+    def _transform_media(self, media_dict):
+        """
+        Transform a dict of raw media series into the model feature matrix X.
+        Uses the allocator's channel order to keep column alignment stable.
+        """
+        X_list = []
+        for ch in self.channel_names:
+            series = np.array(media_dict[ch], dtype=float)
+            if 'theta' in self.params:
+                adstocked = adstock_geometric(series, self.params['theta'])
+            else:
+                adstocked = adstock_weibull(series, self.params['shape'], self.params['scale'])
+            saturated = saturation_hill(
+                adstocked,
+                self.params['saturation_alpha'],
+                self.params['saturation_gamma']
+            )
+            X_list.append(saturated.reshape(-1, 1))
+
+        X_media = np.hstack(X_list)
+        if self.base_vars_data is not None:
+            return np.hstack([X_media, self.base_vars_data])
+        return X_media
         
     def allocate_budget(self, total_budget, channel_bounds=None, 
                        objective='max_response'):
@@ -762,9 +783,11 @@ class BudgetAllocator:
         """
         n_channels = len(self.channel_names)
         
-        # Default bounds: each channel gets 5% to 50% of budget
+        # Default bounds:
+        # Use a *feasible* box constraint (sum of mins must be <= 100%).
+        # If you want business constraints, pass channel_bounds explicitly.
         if channel_bounds is None:
-            channel_bounds = {ch: (0.05, 0.50) for ch in self.channel_names}
+            channel_bounds = {ch: (0.0, 1.0) for ch in self.channel_names}
         
         # Set up optimization bounds
         bounds = []
@@ -772,53 +795,40 @@ class BudgetAllocator:
             min_share, max_share = channel_bounds.get(ch, (0.05, 0.50))
             bounds.append((total_budget * min_share, total_budget * max_share))
         
-        # Objective function
+        # Objective function (SLSQP with equality constraint)
+        # We scale each channel's *historical weekly pattern* to match a candidate annual budget.
+        # This avoids unrealistic "constant weekly spend" and produces non-trivial optima.
+        current_spend_by_ch = np.array([np.sum(self.media_data[ch]) for ch in self.channel_names], dtype=float)
+        current_spend_by_ch = np.where(current_spend_by_ch <= 0, 1e-10, current_spend_by_ch)
+
         def objective_func(budgets):
-            # Ensure sum equals total budget
-            budgets = np.array(budgets)
-            budgets = budgets / np.sum(budgets) * total_budget
-            
-            # Calculate response
-            X_list = []
+            budgets = np.array(budgets, dtype=float)
+
+            scaled_media = {}
             for i, ch in enumerate(self.channel_names):
-                # Use budget as spend level (assuming weekly average)
-                n_weeks = len(self.media_data[ch])
-                weekly_spend = budgets[i] / n_weeks
-                spend_array = np.full(n_weeks, weekly_spend)
-                
-                # Transform
-                if 'theta' in self.params:
-                    adstocked = adstock_geometric(spend_array, self.params['theta'])
-                else:
-                    adstocked = adstock_weibull(spend_array, 
-                                              self.params['shape'], 
-                                              self.params['scale'])
-                
-                saturated = saturation_hill(adstocked, 
-                                          self.params['saturation_alpha'],
-                                          self.params['saturation_gamma'])
-                X_list.append(saturated.reshape(-1, 1))
-            
-            X_media = np.hstack(X_list)
-            if self.base_vars_data is not None:
-                X = np.hstack([X_media, self.base_vars_data])
-            else:
-                X = X_media
-            
-            # Predict total response
+                scale = budgets[i] / current_spend_by_ch[i]
+                scaled_media[ch] = np.array(self.media_data[ch], dtype=float) * scale
+
+            X = self._transform_media(scaled_media)
             pred = self.model.predict(X)
-            total_response = np.sum(pred)
-            
-            # Maximize response (minimize negative)
-            return -total_response
-        
-        # Optimize
-        initial_guess = [total_budget / n_channels] * n_channels
-        result = minimize(objective_func, initial_guess, method='L-BFGS-B', 
-                         bounds=bounds, options={'maxiter': 1000})
-        
-        # Format results
-        optimal_budgets = result.x
+            return -float(np.sum(pred))
+
+        # Start from historical spend shares (more stable than equal split)
+        hist_share = current_spend_by_ch / np.sum(current_spend_by_ch)
+        initial_guess = (hist_share * total_budget).tolist()
+
+        constraints = ({'type': 'eq', 'fun': lambda b: np.sum(b) - total_budget},)
+        result = minimize(
+            objective_func,
+            x0=initial_guess,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 1000, 'ftol': 1e-9}
+        )
+
+        # Format results (ensure exact budget sum after optimizer tolerance)
+        optimal_budgets = np.array(result.x, dtype=float)
         optimal_budgets = optimal_budgets / np.sum(optimal_budgets) * total_budget
         
         allocation = {}
@@ -833,8 +843,13 @@ class BudgetAllocator:
     
     def _calculate_roas(self, channel, budget):
         """
-        Calculate ROAS (Return on Ad Spend) for a channel.
-        ROAS = Incremental Revenue / Spend
+        Calculate historical ROAS (past performance) for a channel.
+
+        This uses a standard MMM counterfactual (leave-one-channel-out):
+        - pred_all: model predictions with all channels as observed historically
+        - pred_wo:  model predictions with this channel set to 0 (others unchanged)
+        Contribution = sum(pred_all - pred_wo)
+        ROAS = Contribution / historical spend of the channel
         
         Parameters:
         -----------
@@ -847,53 +862,19 @@ class BudgetAllocator:
         --------
         float : ROAS value
         """
-        # Get current spend for the channel
-        current_spend = np.sum(self.media_data[channel])
-        n_weeks = len(self.media_data[channel])
-        
-        # Calculate response with zero spend (baseline)
-        zero_spend_media = self.media_data.copy()
-        zero_spend_media[channel] = np.zeros(n_weeks)
-        
-        # Calculate response with allocated budget
-        budget_spend_media = self.media_data.copy()
-        weekly_spend = budget / n_weeks
-        budget_spend_media[channel] = np.full(n_weeks, weekly_spend)
-        
-        # Transform both scenarios
-        def transform_media(media_dict):
-            X_list = []
-            for ch, data in media_dict.items():
-                if 'theta' in self.params:
-                    adstocked = adstock_geometric(data, self.params['theta'])
-                else:
-                    adstocked = adstock_weibull(data, self.params['shape'], self.params['scale'])
-                saturated = saturation_hill(adstocked, 
-                                          self.params['saturation_alpha'],
-                                          self.params['saturation_gamma'])
-                X_list.append(saturated.reshape(-1, 1))
-            X_media = np.hstack(X_list)
-            if self.base_vars_data is not None:
-                return np.hstack([X_media, self.base_vars_data])
-            return X_media
-        
-        X_zero = transform_media(zero_spend_media)
-        X_budget = transform_media(budget_spend_media)
-        
-        # Predict responses
-        pred_zero = self.model.predict(X_zero)
-        pred_budget = self.model.predict(X_budget)
-        
-        # Calculate incremental revenue
-        incremental_revenue = np.sum(pred_budget - pred_zero)
-        
-        # Calculate ROAS
-        if budget > 0:
-            roas = incremental_revenue / budget
-        else:
-            roas = 0.0
-        
-        return roas
+        channel_spend = float(np.sum(self.media_data[channel]))
+        if channel_spend <= 0:
+            return 0.0
+
+        media_all = {ch: np.array(self.media_data[ch], dtype=float) for ch in self.channel_names}
+        media_wo = {ch: np.array(self.media_data[ch], dtype=float) for ch in self.channel_names}
+        media_wo[channel] = np.zeros_like(media_wo[channel])
+
+        pred_all = self.model.predict(self._transform_media(media_all))
+        pred_wo = self.model.predict(self._transform_media(media_wo))
+
+        contribution = float(np.sum(pred_all - pred_wo))
+        return contribution / channel_spend
 
 # %%
 # End-to-End MMM Workflow Function
@@ -1414,7 +1395,7 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
     - ROAS: Return on Ad Spend (Incremental Revenue / Spend)
     - CPM: Cost Per Mille (Spend / Impressions * 1000)
     - Effectiveness: Incremental Revenue per Impression
-    - Due-to Contribution: Media contribution from model decomposition
+    - Due-to Contribution: Media contribution from MMM counterfactual (leave-one-channel-out)
     
     Parameters:
     -----------
@@ -1494,37 +1475,43 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
         base_vars_array_all = None
         X_all = X_media_all
     
-    # Define decomposition function (same as in run_robyn_mmm)
-    def decompose_contributions(model, X_media, X_base, media_names, base_names):
-        """Decompose predictions into baseline and media contributions."""
-        # Baseline contribution (intercept + control variables)
-        if X_base is not None and len(X_base.shape) > 1:
-            n_base = X_base.shape[1]
-            base_contrib = model.intercept + np.sum(X_base * model.coefficients[-n_base:], axis=1)
-        else:
-            base_contrib = np.full(len(X_media), model.intercept)
-        
-        # Media contributions by channel
-        media_contribs = {}
-        n_media = len(media_names)
-        for i, channel in enumerate(media_names):
-            media_contribs[channel] = X_media[:, i] * model.coefficients[i]
-        
-        # Total prediction
-        total_pred = base_contrib + np.sum([media_contribs[ch] for ch in media_names], axis=0)
-        
-        return {
-            'baseline': base_contrib,
-            'media': media_contribs,
-            'total': total_pred
-        }
-    
-    # Get decomposition for all data
-    decomposition_all = decompose_contributions(
-        model, X_media_all, base_vars_array_all,
-        list(media_data_all.keys()), 
-        base_vars_list
-    )
+    # ------------------------------------------------------------------------
+    # Compute per-week channel contributions via leave-one-channel-out
+    # contribution_c[t] = pred_all[t] - pred_without_channel_c[t]
+    # This is more stable/meaningful than coef * transformed_x when features are scaled.
+    # ------------------------------------------------------------------------
+    media_channel_names = [col.replace('mdsp_', '') for col in media_spend_cols]
+
+    def _transform_X_from_media_dict(media_dict):
+        """Build X using the same channel order as media_spend_cols."""
+        X_list = []
+        for ch in media_channel_names:
+            series = np.array(media_dict[ch], dtype=float)
+            if 'theta' in params:
+                adstocked = adstock_geometric(series, params['theta'])
+            else:
+                adstocked = adstock_weibull(series, params['shape'], params['scale'])
+            saturated = saturation_hill(
+                adstocked,
+                params['saturation_alpha'],
+                params['saturation_gamma']
+            )
+            X_list.append(saturated.reshape(-1, 1))
+        X_media = np.hstack(X_list)
+        if base_vars_array_all is not None:
+            return np.hstack([X_media, base_vars_array_all])
+        return X_media
+
+    # Build media dict in the proper order
+    media_all = {ch: np.array(all_data[f"mdsp_{ch}"].values, dtype=float) for ch in media_channel_names}
+    pred_all = model.predict(_transform_X_from_media_dict(media_all))
+
+    contrib_series = {}
+    for ch in media_channel_names:
+        media_wo = {k: np.array(v, dtype=float) for k, v in media_all.items()}
+        media_wo[ch] = np.zeros_like(media_wo[ch])
+        pred_wo = model.predict(_transform_X_from_media_dict(media_wo))
+        contrib_series[ch] = (pred_all - pred_wo)
     
     # Calculate metrics by channel and year
     summary_rows = []
@@ -1533,9 +1520,8 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
         # Use full data for spend and impressions
         year_data_full = data[data['year'] == year].copy()
         
-        # Use train+test data for decomposition (only if year exists in train+test)
+        # Use train+test data for contribution series (only if year exists in train+test)
         year_mask_all = all_data['year'] == year
-        year_data_model = all_data[year_mask_all].copy()
         year_indices = np.where(year_mask_all)[0] if year_mask_all.any() else np.array([])
         
         for i, col in enumerate(media_spend_cols):
@@ -1560,13 +1546,10 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
             else:
                 impressions = np.nan
             
-            # Calculate due-to contribution (media contribution from decomposition)
-            # Only calculate if we have model data for this year
-            if len(year_indices) > 0 and channel_name in decomposition_all['media']:
-                due_to = decomposition_all['media'][channel_name][year_indices].sum()
+            # Due-to contribution via leave-one-channel-out (sum over weeks in that year)
+            if len(year_indices) > 0 and channel_name in contrib_series:
+                due_to = float(np.sum(contrib_series[channel_name][year_indices]))
             else:
-                # If no model data for this year, estimate based on spend and average ROAS
-                # This is a fallback - ideally all years should be in train+test
                 due_to = 0.0
             
             # Calculate ROAS (Incremental Revenue / Spend)
