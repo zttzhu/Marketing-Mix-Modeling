@@ -19,6 +19,25 @@ OPTIMIZATION_MAXITER = 30  # Maximum iterations for hyperparameter optimization
 OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
 ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
 OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
+USE_LOG_LOG_MODEL = True  # Use log-log transformation: log(sales) ~ log(transformed_impressions)
+USE_IMPRESSIONS = True  # Use impressions (mdip_*) instead of spend (mdsp_*)
+
+# Log-Log Model Interpretation:
+# ==============================
+# When USE_LOG_LOG_MODEL = True:
+#   Model form: log(sales) = β₀ + β₁*log(f(impressions₁)) + β₂*log(f(impressions₂)) + ...
+#   where f(x) = saturation(adstock(x))
+#
+# Interpretation:
+#   - Coefficients represent elasticities
+#   - β = 0.5 means: 1% increase in transformed impressions → 0.5% increase in sales
+#   - Captures multiplicative relationships and diminishing returns naturally
+#   - Better for modeling percentage changes and multiplicative effects
+#
+# When USE_LOG_LOG_MODEL = False (Linear):
+#   Model form: sales = β₀ + β₁*f(impressions₁) + β₂*f(impressions₂) + ...
+#   - Coefficients represent absolute contributions
+#   - β = 1000 means: 1 unit increase in transformed impressions → 1000 increase in sales
 
 print("="*80)
 print("MARKETING MIX MODELING - CONFIGURATION")
@@ -26,6 +45,8 @@ print("="*80)
 print(f"Train/Test Split: {TRAIN_TEST_SPLIT}")
 print(f"Adstock Type: {ADSTOCK_TYPE}")
 print(f"Optimize Hyperparameters: {OPTIMIZE_HYPERPARAMS}")
+print(f"Log-Log Model: {USE_LOG_LOG_MODEL}")
+print(f"Use Impressions: {USE_IMPRESSIONS}")
 print("="*80)
 
 # %%
@@ -881,7 +902,8 @@ class BudgetAllocator:
 def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
                   media_spend_cols=None, base_vars=None,
                   adstock_type='geometric', trials=5, 
-                  optimize_hyperparams=True, train_test_split=0.8):
+                  optimize_hyperparams=True, train_test_split=0.8,
+                  use_log_transform=False, use_impressions=False):
     """
     Run end-to-end MMM workflow following Robyn methodology.
     
@@ -894,7 +916,7 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     dep_var : str
         Dependent variable (sales/revenue)
     media_spend_cols : list, optional
-        Media spend columns (auto-detected if None)
+        Media spend/impression columns (auto-detected if None)
     base_vars : list, optional
         Baseline variables
     adstock_type : str
@@ -905,6 +927,10 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         Whether to optimize hyperparameters
     train_test_split : float
         Proportion of data for training (default 0.8)
+    use_log_transform : bool
+        If True, uses log-log model: log(sales) ~ log(transformed_media)
+    use_impressions : bool
+        If True, uses impression columns (mdip_*) instead of spend (mdsp_*)
     
     Returns:
     --------
@@ -913,11 +939,17 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     print("="*80)
     print("ROBYN-STYLE MMM WORKFLOW")
     print("="*80)
+    print(f"Model Type: {'Log-Log' if use_log_transform else 'Linear'}")
+    print(f"Media Variable: {'Impressions (mdip_*)' if use_impressions else 'Spend (mdsp_*)'}")
     
     # 1. Prepare data
     print("\n[1/8] Preparing data...")
     if media_spend_cols is None:
-        media_spend_cols = [col for col in data.columns if "mdsp_" in col]
+        # Auto-detect media columns based on use_impressions flag
+        if use_impressions:
+            media_spend_cols = [col for col in data.columns if "mdip_" in col]
+        else:
+            media_spend_cols = [col for col in data.columns if "mdsp_" in col]
     
     if base_vars is None:
         base_vars = [col for col in data.columns if any(prefix in col 
@@ -930,8 +962,9 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     
     # Extract media data for training
     media_data_train = {}
+    prefix_to_remove = 'mdip_' if use_impressions else 'mdsp_'
     for col in media_spend_cols:
-        channel_name = col.replace('mdsp_', '')
+        channel_name = col.replace(prefix_to_remove, '')
         media_data_train[channel_name] = train_data[col].values
     
     # Extract target and baseline for training
@@ -941,10 +974,19 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     # Extract test data
     media_data_test = {}
     for col in media_spend_cols:
-        channel_name = col.replace('mdsp_', '')
+        channel_name = col.replace(prefix_to_remove, '')
         media_data_test[channel_name] = test_data[col].values
     target_test = test_data[dep_var].values
     base_vars_array_test = test_data[base_vars].values if len(base_vars) > 0 else None
+    
+    # Apply log transformation if enabled
+    if use_log_transform:
+        print("  - Applying log transformation to sales and media variables...")
+        target_train_original = target_train.copy()
+        target_test_original = target_test.copy()
+        target_train = np.log1p(target_train)  # log(1 + sales) to handle zeros
+        target_test = np.log1p(target_test)
+        # Note: Media variables will be log-transformed AFTER adstock/saturation
     
     print(f"  - Media channels: {list(media_data_train.keys())}")
     print(f"  - Baseline variables: {len(base_vars)}")
@@ -986,6 +1028,11 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         saturated = saturation_hill(adstocked, 
                                    best_params['saturation_alpha'],
                                    best_params['saturation_gamma'])
+        
+        # Apply log transformation if enabled (AFTER adstock and saturation)
+        if use_log_transform:
+            saturated = np.log1p(saturated)  # log(1 + x) to handle zeros
+        
         X_list_train.append(saturated.reshape(-1, 1))
     
     X_media_train = np.hstack(X_list_train)
@@ -1006,6 +1053,11 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         saturated = saturation_hill(adstocked, 
                                    best_params['saturation_alpha'],
                                    best_params['saturation_gamma'])
+        
+        # Apply log transformation if enabled
+        if use_log_transform:
+            saturated = np.log1p(saturated)
+        
         X_list_test.append(saturated.reshape(-1, 1))
     
     X_media_test = np.hstack(X_list_test)
@@ -1021,18 +1073,34 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     y_pred_train = model.predict(X_train)
     y_pred_test = model.predict(X_test)
     
+    # Transform predictions back from log space if needed
+    if use_log_transform:
+        y_pred_train_original = np.expm1(y_pred_train)  # exp(x) - 1 to reverse log1p
+        y_pred_test_original = np.expm1(y_pred_test)
+        # Keep log-space predictions for metrics in log space
+        y_pred_train_log = y_pred_train
+        y_pred_test_log = y_pred_test
+        # For evaluation, use original scale
+        y_pred_train = y_pred_train_original
+        y_pred_test = y_pred_test_original
+        target_train_for_metrics = target_train_original
+        target_test_for_metrics = target_test_original
+    else:
+        target_train_for_metrics = target_train
+        target_test_for_metrics = target_test
+    
     # Calculate metrics (training)
-    rmse_train = np.sqrt(mean_squared_error(target_train, y_pred_train))
-    nrmse_train = rmse_train / (np.max(target_train) - np.min(target_train) + 1e-10)
-    r2_train = r2_score(target_train, y_pred_train)
-    mae_train = mean_absolute_error(target_train, y_pred_train)
+    rmse_train = np.sqrt(mean_squared_error(target_train_for_metrics, y_pred_train))
+    nrmse_train = rmse_train / (np.max(target_train_for_metrics) - np.min(target_train_for_metrics) + 1e-10)
+    r2_train = r2_score(target_train_for_metrics, y_pred_train)
+    mae_train = mean_absolute_error(target_train_for_metrics, y_pred_train)
     
     # Calculate metrics (test)
-    rmse_test = np.sqrt(mean_squared_error(target_test, y_pred_test))
-    nrmse_test = rmse_test / (np.max(target_test) - np.min(target_test) + 1e-10)
-    r2_test = r2_score(target_test, y_pred_test)
-    mae_test = mean_absolute_error(target_test, y_pred_test)
-    mape_test = np.mean(np.abs((target_test - y_pred_test) / (target_test + 1e-10))) * 100
+    rmse_test = np.sqrt(mean_squared_error(target_test_for_metrics, y_pred_test))
+    nrmse_test = rmse_test / (np.max(target_test_for_metrics) - np.min(target_test_for_metrics) + 1e-10)
+    r2_test = r2_score(target_test_for_metrics, y_pred_test)
+    mae_test = mean_absolute_error(target_test_for_metrics, y_pred_test)
+    mape_test = np.mean(np.abs((target_test_for_metrics - y_pred_test) / (target_test_for_metrics + 1e-10))) * 100
     
     print(f"\n  Training Metrics:")
     print(f"    - R²: {r2_train:.4f}")
@@ -1096,12 +1164,12 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     plot.figure(figsize=(16, 6))
     
     plot.subplot(1, 3, 1)
-    plot.scatter(target_train, y_pred_train, alpha=0.6, label='Train', s=30)
-    plot.scatter(target_test, y_pred_test, alpha=0.6, label='Test', s=30, marker='^')
-    plot.plot([min(target_train.min(), target_test.min()), 
-               max(target_train.max(), target_test.max())], 
-             [min(target_train.min(), target_test.min()), 
-              max(target_train.max(), target_test.max())], 
+    plot.scatter(target_train_for_metrics, y_pred_train, alpha=0.6, label='Train', s=30)
+    plot.scatter(target_test_for_metrics, y_pred_test, alpha=0.6, label='Test', s=30, marker='^')
+    plot.plot([min(target_train_for_metrics.min(), target_test_for_metrics.min()), 
+               max(target_train_for_metrics.max(), target_test_for_metrics.max())], 
+             [min(target_train_for_metrics.min(), target_test_for_metrics.min()), 
+              max(target_train_for_metrics.max(), target_test_for_metrics.max())], 
              'r--', lw=2, label='Perfect Prediction')
     plot.xlabel('Actual Sales', fontsize=11)
     plot.ylabel('Predicted Sales', fontsize=11)
@@ -1111,8 +1179,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     plot.grid(True, alpha=0.3)
     
     # Residuals plot
-    residuals_train = target_train - y_pred_train
-    residuals_test = target_test - y_pred_test
+    residuals_train = target_train_for_metrics - y_pred_train
+    residuals_test = target_test_for_metrics - y_pred_test
     
     plot.subplot(1, 3, 2)
     plot.scatter(y_pred_train, residuals_train, alpha=0.6, label='Train', s=30)
@@ -1127,7 +1195,7 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     # Time series plot
     plot.subplot(1, 3, 3)
     all_dates = pd.concat([train_data[date_col], test_data[date_col]])
-    all_actual = np.concatenate([target_train, target_test])
+    all_actual = np.concatenate([target_train_for_metrics, target_test_for_metrics])
     all_pred = np.concatenate([y_pred_train, y_pred_test])
     plot.plot(all_dates, all_actual, label='Actual', linewidth=2, alpha=0.7)
     plot.plot(all_dates, all_pred, label='Predicted', linewidth=2, alpha=0.7)
@@ -1198,6 +1266,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     results = {
         'model': model,
         'params': best_params,
+        'use_log_transform': use_log_transform,
+        'use_impressions': use_impressions,
         'metrics': {
             'train': {
                 'r2': r2_train,
@@ -1218,8 +1288,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
             'test': y_pred_test
         },
         'actual': {
-            'train': target_train,
-            'test': target_test
+            'train': target_train_for_metrics,
+            'test': target_test_for_metrics
         },
         'decomposition': {
             'train': decomposition_train,
@@ -1246,12 +1316,14 @@ mmm_results = run_robyn_mmm(
     mmm_data,
     date_col='wk_strt_dt',
     dep_var='sales',
-    media_spend_cols=mdsp_col,
+    media_spend_cols=mdip_col if USE_IMPRESSIONS else mdsp_col,
     base_vars=base_vars,
     adstock_type=ADSTOCK_TYPE,
     trials=5,
     optimize_hyperparams=OPTIMIZE_HYPERPARAMS,
-    train_test_split=TRAIN_TEST_SPLIT
+    train_test_split=TRAIN_TEST_SPLIT,
+    use_log_transform=USE_LOG_LOG_MODEL,
+    use_impressions=USE_IMPRESSIONS
 )
 
 # %%
@@ -1259,79 +1331,154 @@ mmm_results = run_robyn_mmm(
 # BASELINE MMM USING OLS (Alternative approach for comparison)
 # ============================================================================
 # Baseline MMM using OLS on raw spend and control variables
-# Uses subset of media channels and control variables for simplicity
+# IMPROVEMENT: Now uses ALL media channels, ALL controls, adstock, and Ridge regression
 
-# Select subset of media channels (use first 3 if available, otherwise all)
-if len(mdsp_col) >= 3:
-    media_cols_baseline = mdsp_col[:3]
-else:
-    media_cols_baseline = mdsp_col
+def geometric_adstock_simple(x, decay=0.5):
+    """
+    Apply geometric adstock transformation for lagged marketing effects.
+    
+    Parameters:
+    -----------
+    x : array-like
+        Media variable to transform
+    decay : float
+        Decay rate (0-1). Higher = longer carryover effect
+    
+    Returns:
+    --------
+    array : Adstocked variable
+    """
+    adstocked = np.zeros_like(x, dtype=float)
+    adstocked[0] = x[0]
+    for i in range(1, len(x)):
+        adstocked[i] = x[i] + decay * adstocked[i-1]
+    return adstocked
 
-# Select subset of control variables (use first 2 if available)
-if len(base_vars) >= 2:
-    control_cols_baseline = base_vars[:2]
-else:
-    control_cols_baseline = base_vars if len(base_vars) > 0 else []
+# Use ALL media channels and control variables (not just subset)
+media_cols_baseline = mdsp_col  # All media spend columns
+control_cols_baseline = base_vars  # All control variables
 
 print("\n" + "="*80)
-print("BASELINE OLS MMM")
+print("IMPROVED BASELINE OLS MMM")
 print("="*80)
-print(f"Media channels: {[col.replace('mdsp_', '') for col in media_cols_baseline]}")
-print(f"Control variables: {control_cols_baseline}")
+print(f"Media channels ({len(media_cols_baseline)}): {[col.replace('mdsp_', '') for col in media_cols_baseline]}")
+print(f"Control variables ({len(control_cols_baseline)}): {len(control_cols_baseline)} features")
+print(f"Using adstock transformation with decay=0.5")
+print(f"Using Ridge regression with regularization")
 
-# Log-transform sales and features to stabilize variance
+# Apply adstock transformation to media variables
 model_data = mmm_data.copy()
-model_data['sales_log'] = np.log1p(model_data['sales'])
-for col in media_cols_baseline + control_cols_baseline:
-    model_data[f'{col}_log'] = np.log1p(model_data[col])
+adstock_decay = 0.5  # Can be optimized later
+
+for col in media_cols_baseline:
+    model_data[f'{col}_adstock'] = geometric_adstock_simple(model_data[col].values, decay=adstock_decay)
 
 # Chronological train/test split (same split as Robyn model)
 split_point = int(len(model_data) * TRAIN_TEST_SPLIT)
 train_baseline = model_data.iloc[:split_point]
 test_baseline = model_data.iloc[split_point:]
 
-# Prepare features
-feature_cols = [f'{col}_log' for col in media_cols_baseline + control_cols_baseline]
+# Prepare features: adstocked media + all controls
+adstock_feature_cols = [f'{col}_adstock' for col in media_cols_baseline]
+feature_cols_all = adstock_feature_cols + control_cols_baseline
 
-# Fit simple linear regression
-X_train_baseline = sm.add_constant(train_baseline[feature_cols])
-y_train_baseline = train_baseline['sales_log']
-baseline_ols_model = sm.OLS(y_train_baseline, X_train_baseline).fit()
-
-# Evaluate on holdout set
-X_test_baseline = sm.add_constant(test_baseline[feature_cols])
-y_test_baseline = test_baseline['sales_log']
-y_pred_baseline_log = baseline_ols_model.predict(X_test_baseline)
-
-# Convert back from log space
-y_pred_baseline = np.expm1(y_pred_baseline_log)
+# Create feature matrices
+X_train_baseline = train_baseline[feature_cols_all].values
+y_train_baseline = train_baseline['sales'].values
+X_test_baseline = test_baseline[feature_cols_all].values
 y_test_baseline_actual = test_baseline['sales'].values
 
-# Calculate metrics
-rmse_baseline = np.sqrt(np.mean((y_test_baseline_actual - y_pred_baseline) ** 2))
-mape_baseline = np.mean(np.abs((y_test_baseline_actual - y_pred_baseline) / (y_test_baseline_actual + 1e-10))) * 100
-r2_baseline = r2_score(y_test_baseline_actual, y_pred_baseline)
-mae_baseline = mean_absolute_error(y_test_baseline_actual, y_pred_baseline)
+# Standardize features (important for Ridge regression)
+scaler_baseline = StandardScaler()
+X_train_baseline_scaled = scaler_baseline.fit_transform(X_train_baseline)
+X_test_baseline_scaled = scaler_baseline.transform(X_test_baseline)
 
-print("\nBaseline OLS Model Summary:")
-print(baseline_ols_model.summary())
+# Fit Ridge regression (with regularization to prevent overfitting)
+# Ridge is better than OLS when you have many correlated features
+baseline_ridge_model = Ridge(alpha=100.0)  # Regularization strength
+baseline_ridge_model.fit(X_train_baseline_scaled, y_train_baseline)
+
+# Predictions
+y_pred_baseline_train = baseline_ridge_model.predict(X_train_baseline_scaled)
+y_pred_baseline = baseline_ridge_model.predict(X_test_baseline_scaled)
+
+# Calculate metrics for both train and test
+r2_baseline_train = r2_score(y_train_baseline, y_pred_baseline_train)
+rmse_baseline_train = np.sqrt(mean_squared_error(y_train_baseline, y_pred_baseline_train))
+mae_baseline_train = mean_absolute_error(y_train_baseline, y_pred_baseline_train)
+mape_baseline_train = np.mean(np.abs((y_train_baseline - y_pred_baseline_train) / (y_train_baseline + 1e-10))) * 100
+
+r2_baseline = r2_score(y_test_baseline_actual, y_pred_baseline)
+rmse_baseline = np.sqrt(mean_squared_error(y_test_baseline_actual, y_pred_baseline))
+mae_baseline = mean_absolute_error(y_test_baseline_actual, y_pred_baseline)
+mape_baseline = np.mean(np.abs((y_test_baseline_actual - y_pred_baseline) / (y_test_baseline_actual + 1e-10))) * 100
+
+print("\n" + "-"*80)
+print("IMPROVED BASELINE MODEL RESULTS")
+print("-"*80)
+print(f"\nTraining Set Metrics:")
+print(f"  R²:   {r2_baseline_train:.4f}")
+print(f"  RMSE: {rmse_baseline_train:,.0f}")
+print(f"  MAE:  {mae_baseline_train:,.0f}")
+print(f"  MAPE: {mape_baseline_train:.2f}%")
+
 print(f"\nTest Set Metrics:")
-print(f"  R²: {r2_baseline:.4f}")
-print(f"  RMSE: {rmse_baseline:.2f}")
-print(f"  MAE: {mae_baseline:.2f}")
+print(f"  R²:   {r2_baseline:.4f}")
+print(f"  RMSE: {rmse_baseline:,.0f}")
+print(f"  MAE:  {mae_baseline:,.0f}")
 print(f"  MAPE: {mape_baseline:.2f}%")
 
+# Feature importance (top 10 most important features)
+feature_importance = pd.DataFrame({
+    'Feature': feature_cols_all,
+    'Coefficient': baseline_ridge_model.coef_
+})
+feature_importance['Abs_Coefficient'] = np.abs(feature_importance['Coefficient'])
+feature_importance = feature_importance.sort_values('Abs_Coefficient', ascending=False)
+
+print(f"\nTop 10 Most Important Features:")
+print(feature_importance[['Feature', 'Coefficient']].head(10).to_string(index=False))
+
 # Plot actual vs predicted sales
-plot.figure(figsize=(12,6))
+plot.figure(figsize=(14,7))
+
+# Subplot 1: Test set
+plot.subplot(1, 2, 1)
 plot.plot(test_baseline['wk_strt_dt'], y_test_baseline_actual, label='Actual', linewidth=2, alpha=0.7)
 plot.plot(test_baseline['wk_strt_dt'], y_pred_baseline, label='Predicted', linewidth=2, alpha=0.7)
 plot.legend()
-plot.xlabel('Date', fontsize=12)
-plot.ylabel('Sales', fontsize=12)
-plot.title(f'Baseline OLS Model: Actual vs Predicted Sales (R² = {r2_baseline:.3f})', 
-           fontsize=13, fontweight='bold')
+plot.xlabel('Date', fontsize=11)
+plot.ylabel('Sales', fontsize=11)
+plot.title(f'Test Set: Improved Baseline Model (R² = {r2_baseline:.3f})', 
+           fontsize=12, fontweight='bold')
 plot.grid(True, alpha=0.3)
 plot.xticks(rotation=45)
+
+# Subplot 2: Residuals
+plot.subplot(1, 2, 2)
+residuals = y_test_baseline_actual - y_pred_baseline
+plot.scatter(y_pred_baseline, residuals, alpha=0.5)
+plot.axhline(y=0, color='r', linestyle='--', linewidth=2)
+plot.xlabel('Predicted Sales', fontsize=11)
+plot.ylabel('Residuals', fontsize=11)
+plot.title('Residual Plot (Test Set)', fontsize=12, fontweight='bold')
+plot.grid(True, alpha=0.3)
+
+plot.tight_layout()
+plot.show()
+
+# Additional diagnostic: Actual vs Predicted scatter
+plot.figure(figsize=(8, 8))
+plot.scatter(y_test_baseline_actual, y_pred_baseline, alpha=0.6)
+plot.plot([y_test_baseline_actual.min(), y_test_baseline_actual.max()], 
+          [y_test_baseline_actual.min(), y_test_baseline_actual.max()], 
+          'r--', lw=2, label='Perfect Prediction')
+plot.xlabel('Actual Sales', fontsize=12)
+plot.ylabel('Predicted Sales', fontsize=12)
+plot.title(f'Actual vs Predicted (Test Set, R² = {r2_baseline:.3f})', 
+           fontsize=13, fontweight='bold')
+plot.legend()
+plot.grid(True, alpha=0.3)
 plot.tight_layout()
 plot.show()
 
