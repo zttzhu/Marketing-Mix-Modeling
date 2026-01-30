@@ -1298,6 +1298,9 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         'response_curves': response_curves,
         'budget_allocation': allocation,
         'feature_names': list(media_data_train.keys()) + base_vars,
+        'media_channel_names': list(media_data_train.keys()),
+        'media_cols_used': media_spend_cols,  # Store which columns were used for training
+        'base_vars': base_vars,
         'coefficients': model.coefficients,
         'train_data': train_data,
         'test_data': test_data
@@ -1532,7 +1535,8 @@ print("="*80)
 
 def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt', 
                                      dep_var='sales', media_spend_cols=None, 
-                                     media_impression_cols=None):
+                                     media_impression_cols=None,
+                                     use_log_transform=False):
     """
     Calculate comprehensive metrics for each media channel by year.
     
@@ -1558,6 +1562,8 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
         Media spend column names
     media_impression_cols : list
         Media impression column names
+    use_log_transform : bool
+        Whether the model was trained with log-log transformation
     
     Returns:
     --------
@@ -1592,32 +1598,63 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
     
     # Get decomposition for all data
     # We need to transform all data and get contributions
+    # Use the same columns that the model was trained on
+    media_cols_used = mmm_results.get('media_cols_used', media_spend_cols)
+    media_channel_names_trained = mmm_results.get('media_channel_names', 
+        [col.replace('mdsp_', '').replace('mdip_', '') for col in media_cols_used])
+    
+    # Determine column prefix used during training
+    if len(media_cols_used) > 0:
+        if 'mdip_' in media_cols_used[0]:
+            col_prefix = 'mdip_'
+        else:
+            col_prefix = 'mdsp_'
+    else:
+        col_prefix = 'mdsp_'
+    
     media_data_all = {}
-    for col in media_spend_cols:
-        channel_name = col.replace('mdsp_', '')
-        media_data_all[channel_name] = all_data[col].values
+    for ch in media_channel_names_trained:
+        col_name = f"{col_prefix}{ch}"
+        if col_name in all_data.columns:
+            media_data_all[ch] = all_data[col_name].values
+        else:
+            # Fallback: try the original column name
+            for col in media_cols_used:
+                if ch in col:
+                    media_data_all[ch] = all_data[col].values if col in all_data.columns else np.zeros(len(all_data))
+                    break
     
     # Transform all media data
     X_list_all = []
-    for channel, channel_data in media_data_all.items():
-        if 'theta' in params:
-            adstocked = adstock_geometric(channel_data, params['theta'])
-        else:
-            adstocked = adstock_weibull(channel_data, params['shape'], params['scale'])
-        saturated = saturation_hill(adstocked, 
-                                   params['saturation_alpha'],
-                                   params['saturation_gamma'])
-        X_list_all.append(saturated.reshape(-1, 1))
+    for channel in media_channel_names_trained:
+        if channel in media_data_all:
+            channel_data = media_data_all[channel]
+            if 'theta' in params:
+                adstocked = adstock_geometric(channel_data, params['theta'])
+            else:
+                adstocked = adstock_weibull(channel_data, params['shape'], params['scale'])
+            saturated = saturation_hill(adstocked, 
+                                       params['saturation_alpha'],
+                                       params['saturation_gamma'])
+            # Apply log transformation if enabled
+            if use_log_transform:
+                saturated = np.log1p(saturated)
+            X_list_all.append(saturated.reshape(-1, 1))
     
-    X_media_all = np.hstack(X_list_all)
+    X_media_all = np.hstack(X_list_all) if X_list_all else np.array([]).reshape(len(all_data), 0)
     
-    # Get base variables
-    base_vars_list = mmm_results['feature_names'][len(media_data_all):] if \
-        len(mmm_results['feature_names']) > len(media_data_all) else []
+    # Get base variables from stored mmm_results (more reliable than deriving from feature_names)
+    base_vars_list = mmm_results.get('base_vars', [])
     
     if len(base_vars_list) > 0:
-        base_vars_array_all = all_data[base_vars_list].values
-        X_all = np.hstack([X_media_all, base_vars_array_all])
+        # Filter to only include columns that exist in all_data
+        available_base_vars = [col for col in base_vars_list if col in all_data.columns]
+        if len(available_base_vars) > 0:
+            base_vars_array_all = all_data[available_base_vars].values
+            X_all = np.hstack([X_media_all, base_vars_array_all])
+        else:
+            base_vars_array_all = None
+            X_all = X_media_all
     else:
         base_vars_array_all = None
         X_all = X_media_all
@@ -1627,10 +1664,11 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
     # contribution_c[t] = pred_all[t] - pred_without_channel_c[t]
     # This is more stable/meaningful than coef * transformed_x when features are scaled.
     # ------------------------------------------------------------------------
-    media_channel_names = [col.replace('mdsp_', '') for col in media_spend_cols]
+    # Use the channel names that the model was trained on
+    media_channel_names = media_channel_names_trained
 
     def _transform_X_from_media_dict(media_dict):
-        """Build X using the same channel order as media_spend_cols."""
+        """Build X using the same channel order as model training."""
         X_list = []
         for ch in media_channel_names:
             series = np.array(media_dict[ch], dtype=float)
@@ -1643,22 +1681,96 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
                 params['saturation_alpha'],
                 params['saturation_gamma']
             )
+            # Apply log transformation if the model was trained with log-log
+            if use_log_transform:
+                saturated = np.log1p(saturated)
             X_list.append(saturated.reshape(-1, 1))
         X_media = np.hstack(X_list)
         if base_vars_array_all is not None:
             return np.hstack([X_media, base_vars_array_all])
         return X_media
 
-    # Build media dict in the proper order
-    media_all = {ch: np.array(all_data[f"mdsp_{ch}"].values, dtype=float) for ch in media_channel_names}
-    pred_all = model.predict(_transform_X_from_media_dict(media_all))
-
-    contrib_series = {}
+    # Build media dict using the same columns that the model was trained on
+    media_all = {}
     for ch in media_channel_names:
-        media_wo = {k: np.array(v, dtype=float) for k, v in media_all.items()}
-        media_wo[ch] = np.zeros_like(media_wo[ch])
-        pred_wo = model.predict(_transform_X_from_media_dict(media_wo))
-        contrib_series[ch] = (pred_all - pred_wo)
+        col_name = f"{col_prefix}{ch}"
+        if col_name in all_data.columns:
+            media_all[ch] = np.array(all_data[col_name].values, dtype=float)
+        else:
+            media_all[ch] = np.zeros(len(all_data))
+    
+    # ------------------------------------------------------------------------
+    # Calculate channel contributions
+    # For log-log models: use coefficient-based attribution (more stable)
+    # For linear models: use leave-one-out (standard approach)
+    # ------------------------------------------------------------------------
+    
+    pred_all_raw = model.predict(_transform_X_from_media_dict(media_all))
+    
+    # Get transformed X values for coefficient-based attribution
+    X_all_transformed = _transform_X_from_media_dict(media_all)
+    
+    if use_log_transform:
+        # For log-log models, use coefficient-based attribution
+        # This is more stable than leave-one-out which causes extreme predictions
+        # when zeroing channels in log space
+        
+        pred_all = np.expm1(pred_all_raw)  # Convert predictions to original scale
+        
+        # Get model coefficients (these are for scaled features)
+        coefficients = model.coefficients
+        n_media = len(media_channel_names)
+        media_coefficients = coefficients[:n_media]
+        
+        # Scale X values to match what model sees
+        if model.scaler is not None:
+            X_scaled = model.scaler.transform(X_all_transformed)
+        else:
+            X_scaled = X_all_transformed
+        
+        # Calculate contribution using coefficient × scaled_x approach
+        # Then convert to share of total predicted sales
+        contrib_series = {}
+        
+        # Total media contribution in log space
+        total_media_contrib_log = np.sum(
+            [media_coefficients[i] * X_scaled[:, i] for i in range(n_media)], 
+            axis=0
+        )
+        
+        for i, ch in enumerate(media_channel_names):
+            # Channel contribution in log space
+            ch_contrib_log = media_coefficients[i] * X_scaled[:, i]
+            
+            # Calculate share of media contribution
+            # Avoid division by zero
+            with np.errstate(divide='ignore', invalid='ignore'):
+                share = np.where(
+                    np.abs(total_media_contrib_log) > 1e-10,
+                    ch_contrib_log / total_media_contrib_log,
+                    0.0
+                )
+            
+            # Apply share to predicted sales minus baseline
+            # Baseline = intercept effect (when all media = 0)
+            baseline_pred_log = model.intercept
+            baseline_pred = np.expm1(baseline_pred_log) if baseline_pred_log > 0 else 0
+            
+            incremental_sales = pred_all - baseline_pred
+            incremental_sales = np.maximum(incremental_sales, 0)  # No negative contributions
+            
+            contrib_series[ch] = share * incremental_sales
+            
+    else:
+        # For linear models, leave-one-out works well
+        pred_all = pred_all_raw
+        
+        contrib_series = {}
+        for ch in media_channel_names:
+            media_wo = {k: np.array(v, dtype=float) for k, v in media_all.items()}
+            media_wo[ch] = np.zeros_like(media_wo[ch])
+            pred_wo = model.predict(_transform_X_from_media_dict(media_wo))
+            contrib_series[ch] = (pred_all - pred_wo)
     
     # Calculate metrics by channel and year
     summary_rows = []
@@ -1741,7 +1853,8 @@ channel_metrics = calculate_channel_metrics_by_year(
     date_col='wk_strt_dt',
     dep_var='sales',
     media_spend_cols=mdsp_col,
-    media_impression_cols=mdip_col
+    media_impression_cols=mdip_col,
+    use_log_transform=USE_LOG_LOG_MODEL
 )
 
 # Format and display summary table
