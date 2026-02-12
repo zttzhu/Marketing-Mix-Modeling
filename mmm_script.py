@@ -62,25 +62,20 @@ from scipy.optimize import differential_evolution, minimize
 from scipy import stats
 import warnings
 import statsmodels.api as sm
-import os
-from datetime import datetime
 warnings.filterwarnings('ignore')
 pd.set_option('display.float_format', '{:.2f}'.format)
 
 # %%
 mmm_data = pd.read_csv("data.csv")
-# %%
-mmm_data
-# %%
-# Check to see if there are any NAs
-mmm_data.columns[mmm_data.isna().sum()>0] # No NAs
-# %%
-# understand data
-mmm_data.describe()
-mmm_data.columns
-# Data is at weekly level and end at Sunday
+# Validate key assumptions and parse date column once.
+missing_cols = mmm_data.columns[mmm_data.isna().any()].tolist()
+if missing_cols:
+    print(f"Warning: columns with missing values detected: {missing_cols}")
+
 mmm_data['wk_strt_dt'] = pd.to_datetime(mmm_data['wk_strt_dt'])
-mmm_data['wk_strt_dt'].dt.dayofweek.unique()
+weekdays = sorted(mmm_data['wk_strt_dt'].dt.dayofweek.unique().tolist())
+if weekdays != [6]:
+    print(f"Note: wk_strt_dt weekday values are {weekdays} (expected weekly Sunday=6).")
 # %%
 # 1. Media Variables 
 # media impression columns
@@ -555,95 +550,6 @@ class MMMOptimizer:
                 'ridge_alpha': result.x[2],
                 'nrmse': result.fun
             }
-
-# %%
-# Pareto Frontier Analysis (Robyn-style)
-class ParetoFrontier:
-    """
-    Analyze Pareto frontier for model selection.
-    Balances model fit (NRMSE) vs. decomposition quality (RSSD).
-    """
-    
-    def __init__(self):
-        self.models = []
-        self.pareto_models = []
-        
-    def add_model(self, model_id, nrmse, rssd, params, model_obj):
-        """Add a model candidate to the frontier."""
-        self.models.append({
-            'model_id': model_id,
-            'nrmse': nrmse,
-            'rssd': rssd,
-            'params': params,
-            'model': model_obj
-        })
-    
-    def calculate_rssd(self, y_true, y_pred, y_decomp):
-        """
-        Calculate Root Sum of Squared Decomposition (RSSD).
-        Measures how well model explains decomposition.
-        """
-        return np.sqrt(np.sum((y_true - y_decomp) ** 2))
-    
-    def find_pareto_frontier(self):
-        """Find Pareto-optimal models."""
-        if len(self.models) == 0:
-            return []
-        
-        # Sort by NRMSE
-        sorted_models = sorted(self.models, key=lambda x: x['nrmse'])
-        
-        pareto = []
-        for model in sorted_models:
-            is_dominated = False
-            for pareto_model in pareto:
-                # Check if dominated (worse in both metrics)
-                if (pareto_model['nrmse'] <= model['nrmse'] and 
-                    pareto_model['rssd'] <= model['rssd']):
-                    is_dominated = True
-                    break
-            if not is_dominated:
-                # Remove models dominated by this one
-                pareto = [m for m in pareto if not 
-                         (model['nrmse'] <= m['nrmse'] and model['rssd'] <= m['rssd'])]
-                pareto.append(model)
-        
-        self.pareto_models = pareto
-        return pareto
-    
-    def plot_pareto_frontier(self):
-        """Visualize Pareto frontier."""
-        if len(self.models) == 0:
-            print("No models to plot")
-            return
-        
-        plot.figure(figsize=(10, 6))
-        
-        # Plot all models
-        nrmse_all = [m['nrmse'] for m in self.models]
-        rssd_all = [m['rssd'] for m in self.models]
-        plot.scatter(nrmse_all, rssd_all, alpha=0.5, label='All Models', s=50)
-        
-        # Plot Pareto frontier
-        if len(self.pareto_models) > 0:
-            nrmse_pareto = [m['nrmse'] for m in self.pareto_models]
-            rssd_pareto = [m['rssd'] for m in self.pareto_models]
-            plot.scatter(nrmse_pareto, rssd_pareto, color='red', 
-                        s=100, marker='*', label='Pareto Frontier', zorder=5)
-            
-            # Annotate Pareto models
-            for i, model in enumerate(self.pareto_models):
-                plot.annotate(f"Model {model['model_id']}", 
-                            (model['nrmse'], model['rssd']),
-                            xytext=(5, 5), textcoords='offset points', fontsize=8)
-        
-        plot.xlabel('NRMSE (Lower is Better)', fontsize=12)
-        plot.ylabel('RSSD (Lower is Better)', fontsize=12)
-        plot.title('Pareto Frontier: Model Selection', fontsize=14, fontweight='bold')
-        plot.legend()
-        plot.grid(True, alpha=0.3)
-        plot.tight_layout()
-        plot.show()
 
 # %%
 # Response Curves Generator
@@ -1988,15 +1894,21 @@ pivot_due_to = channel_metrics.pivot_table(
 
 print("\nTotal Spend by Channel and Year:")
 print("-" * 100)
-print(pivot_spend.applymap(lambda x: f"${x:,.0f}"))
+def format_dataframe_elementwise(df, formatter):
+    """Compat helper: pandas>=2.1 uses DataFrame.map; older versions use applymap."""
+    if hasattr(df, "map"):
+        return df.map(formatter)
+    return df.applymap(formatter)
+
+print(format_dataframe_elementwise(pivot_spend, lambda x: f"${x:,.0f}"))
 
 print("\nAverage ROAS by Channel and Year:")
 print("-" * 100)
-print(pivot_roas.applymap(lambda x: f"{x:.2f}"))
+print(format_dataframe_elementwise(pivot_roas, lambda x: f"{x:.2f}"))
 
 print("\nTotal Due-to Contribution by Channel and Year:")
 print("-" * 100)
-print(pivot_due_to.applymap(lambda x: f"${x:,.0f}"))
+print(format_dataframe_elementwise(pivot_due_to, lambda x: f"${x:,.0f}"))
 
 # Calculate totals across all years
 print("\n" + "="*100)
