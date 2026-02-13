@@ -27,6 +27,14 @@ This project implements a production-ready Marketing Mix Model (MMM) that:
 - **Calculates business metrics** (ROAS, CPM, Effectiveness) by channel and year
 - **Compares models** (Robyn MMM vs. Baseline OLS) for validation
 
+## Recent Changes
+
+- Added a non-interactive script mode with `ENABLE_PLOTS=False` by default to avoid popup charts.
+- Updated hyperparameter optimization to use a validation split inside training for more robust generalization.
+- Standardized media transformation with normalized adstock+saturation to improve numerical stability.
+- Added ROAS reporting guardrails (`MAX_REASONABLE_ROAS`) and included `ROAS (raw)` in channel metrics output.
+- Tuned default optimization bounds to reduce extreme parameter solutions.
+
 ## ✨ Features
 
 ### Core Functionality
@@ -125,7 +133,7 @@ cd Marketing-Mix-Modeling
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+pip install numpy pandas seaborn matplotlib scikit-learn scipy statsmodels
 ```
 
 3. Place your data file as `data.csv` in the project directory
@@ -154,6 +162,10 @@ OPTIMIZATION_MAXITER = 30  # Maximum iterations for hyperparameter optimization
 OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
 ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
 OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
+ENABLE_PLOTS = False  # Disable popup charts in script mode
+OPTIMIZER_VALIDATION_SPLIT = 0.2  # Validation split during hyperparameter search
+COUNTERFACTUAL_REDUCTION = 1.0  # Counterfactual reduction level for attribution
+MAX_REASONABLE_ROAS = 20.0  # ROAS guardrail in reported outputs
 ```
 
 ### Custom Usage
@@ -224,21 +236,25 @@ A simple OLS model is also provided for comparison:
 | `OPTIMIZATION_POPSIZE` | 10 | Population size for differential evolution |
 | `ADSTOCK_TYPE` | 'geometric' | Adstock type: 'geometric' or 'weibull' |
 | `OPTIMIZE_HYPERPARAMS` | True | Whether to optimize hyperparameters |
+| `ENABLE_PLOTS` | False | Set True to render charts; False avoids popup windows |
+| `OPTIMIZER_VALIDATION_SPLIT` | 0.2 | Validation holdout inside training for optimizer objective |
+| `COUNTERFACTUAL_REDUCTION` | 1.0 | Media reduction level for channel counterfactuals |
+| `MAX_REASONABLE_ROAS` | 20.0 | ROAS cap used in reported metrics |
 
 ### Hyperparameter Bounds
 
 **Geometric Adstock:**
 - θ (decay): [0.01, 0.99]
-- Ridge α: [0.01, 100.0]
-- Saturation α: [0.1, 10.0]
-- Saturation γ: [0.1, 3.0]
+- Ridge α: [0.1, 200.0]
+- Saturation α: [0.1, 3.0]
+- Saturation γ: [0.3, 3.0]
 
 **Weibull Adstock:**
-- Shape: [0.1, 10.0]
+- Shape: [0.1, 8.0]
 - Scale: [0.1, 20.0]
-- Ridge α: [0.01, 100.0]
-- Saturation α: [0.1, 10.0]
-- Saturation γ: [0.1, 3.0]
+- Ridge α: [0.1, 200.0]
+- Saturation α: [0.1, 3.0]
+- Saturation γ: [0.3, 3.0]
 
 ## 📈 Outputs
 
@@ -282,6 +298,7 @@ Comprehensive summary table with:
 - **Spend**: Total spend per channel per year
 - **Impressions**: Total impressions per channel per year
 - **ROAS**: Return on Ad Spend
+- **ROAS (raw)**: Uncapped ROAS before reporting guardrail
 - **CPM**: Cost Per Mille (cost per 1,000 impressions)
 - **Effectiveness**: Incremental revenue per impression
 - **Due-to Contribution**: Media contribution from model
@@ -444,3 +461,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ---
 
 For detailed code review and recommendations, see `MMM_SCRIPT_REVIEW.md`.
+

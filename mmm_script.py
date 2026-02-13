@@ -19,26 +19,10 @@ OPTIMIZATION_MAXITER = 30  # Maximum iterations for hyperparameter optimization
 OPTIMIZATION_POPSIZE = 10  # Population size for differential evolution
 ADSTOCK_TYPE = 'geometric'  # 'geometric' or 'weibull'
 OPTIMIZE_HYPERPARAMS = True  # Whether to optimize hyperparameters
-USE_LOG_LOG_MODEL = False  # Use log-log transformation: log(sales) ~ log(transformed_impressions)
-USE_IMPRESSIONS = False  # Use impressions (mdip_*) instead of spend (mdsp_*)
-SKIP_CHARTS = True  # Skip all chart generation to avoid manual closing
-
-# Log-Log Model Interpretation:
-# ==============================
-# When USE_LOG_LOG_MODEL = True:
-#   Model form: log(sales) = β₀ + β₁*log(f(impressions₁)) + β₂*log(f(impressions₂)) + ...
-#   where f(x) = saturation(adstock(x))
-#
-# Interpretation:
-#   - Coefficients represent elasticities
-#   - β = 0.5 means: 1% increase in transformed impressions → 0.5% increase in sales
-#   - Captures multiplicative relationships and diminishing returns naturally
-#   - Better for modeling percentage changes and multiplicative effects
-#
-# When USE_LOG_LOG_MODEL = False (Linear):
-#   Model form: sales = β₀ + β₁*f(impressions₁) + β₂*f(impressions₂) + ...
-#   - Coefficients represent absolute contributions
-#   - β = 1000 means: 1 unit increase in transformed impressions → 1000 increase in sales
+ENABLE_PLOTS = False  # Set to True to enable chart rendering/popups
+OPTIMIZER_VALIDATION_SPLIT = 0.2  # Validation holdout within training during hyperparameter search
+COUNTERFACTUAL_REDUCTION = 1.0  # Use full removal counterfactual for attribution
+MAX_REASONABLE_ROAS = 20.0  # Reporting guardrail to prevent implausible ROAS explosions
 
 print("="*80)
 print("MARKETING MIX MODELING - CONFIGURATION")
@@ -46,8 +30,10 @@ print("="*80)
 print(f"Train/Test Split: {TRAIN_TEST_SPLIT}")
 print(f"Adstock Type: {ADSTOCK_TYPE}")
 print(f"Optimize Hyperparameters: {OPTIMIZE_HYPERPARAMS}")
-print(f"Log-Log Model: {USE_LOG_LOG_MODEL}")
-print(f"Use Impressions: {USE_IMPRESSIONS}")
+print(f"Enable Plots: {ENABLE_PLOTS}")
+print(f"Optimizer Validation Split: {OPTIMIZER_VALIDATION_SPLIT}")
+print(f"Counterfactual Reduction: {COUNTERFACTUAL_REDUCTION}")
+print(f"Max Reasonable ROAS: {MAX_REASONABLE_ROAS}")
 print("="*80)
 
 # %%
@@ -64,6 +50,12 @@ import warnings
 import statsmodels.api as sm
 warnings.filterwarnings('ignore')
 pd.set_option('display.float_format', '{:.2f}'.format)
+if not ENABLE_PLOTS:
+    # Keep script execution non-interactive when run from terminal.
+    plot.ioff()
+    def _skip_show(*args, **kwargs):
+        plot.close('all')
+    plot.show = _skip_show
 
 # %%
 mmm_data = pd.read_csv("data.csv")
@@ -98,25 +90,25 @@ base_vars = me_col+hol_col+sea_col+st_col+dis_col
 
 # 3. Sales Variables
 sales_col = ['sales']
-# %% 
+# %%
 # EDA 
 # plot sales overtime. Observe seasonal pattern - Reach the peak by the end of each year
-if not SKIP_CHARTS:
+if ENABLE_PLOTS:
     plot.figure(figsize=(16,8))
     plot.plot(mmm_data['wk_strt_dt'],mmm_data['sales'])
 
 # %%
 # Heatmap between impressions and sales - sales has the strongest correlation with mdip_vidtr
-if not SKIP_CHARTS:
+if ENABLE_PLOTS:
     plot.figure(figsize=(10,8))
     sns.heatmap(mmm_data[mdip_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
 # %%
 # Spend and sales: mdsp_vidtr has the strongest correlation with sales
-if not SKIP_CHARTS:
+if ENABLE_PLOTS:
     sns.heatmap(mmm_data[mdsp_col+sales_col].corr(),square=True,annot=True,vmax=1,vmin=-1,cmap="RdBu")
 # %%
 # Draw distribution
-if not SKIP_CHARTS:
+if ENABLE_PLOTS:
     sns.histplot(mmm_data[sales_col])
     sns.pairplot(mmm_data[mdip_col+sales_col],x_vars= mdip_col,y_vars=sales_col)
 
@@ -176,7 +168,7 @@ def show_media_spend(data, date_col='wk_strt_dt', spend_cols=None, plot_type='al
         print("\n")
     
     # Time series plot
-    if plot_type in ['all', 'time_series']:
+    if ENABLE_PLOTS and plot_type in ['all', 'time_series']:
         plot.figure(figsize=figsize)
         num_channels = len(spend_cols)
         rows = (num_channels + 1) // 2
@@ -195,7 +187,7 @@ def show_media_spend(data, date_col='wk_strt_dt', spend_cols=None, plot_type='al
         plot.show()
     
     # Comparison plot (all channels together)
-    if plot_type in ['all', 'comparison']:
+    if ENABLE_PLOTS and plot_type in ['all', 'comparison']:
         plot.figure(figsize=figsize)
         for col, channel in zip(spend_cols, channel_names):
             plot.plot(data[date_col], data[col], label=channel.upper(), linewidth=2, alpha=0.8)
@@ -209,7 +201,7 @@ def show_media_spend(data, date_col='wk_strt_dt', spend_cols=None, plot_type='al
         plot.show()
     
     # Total spend by channel (bar chart)
-    if plot_type in ['all', 'total']:
+    if ENABLE_PLOTS and plot_type in ['all', 'total']:
         plot.figure(figsize=(12, 6))
         summary_stats_sorted = summary_stats.sort_values('Total_Spend', ascending=False)
         bars = plot.bar(summary_stats_sorted['Channel'], summary_stats_sorted['Total_Spend'], 
@@ -242,7 +234,7 @@ def show_media_spend(data, date_col='wk_strt_dt', spend_cols=None, plot_type='al
         plot.show()
     
     # Distribution plot
-    if plot_type in ['all', 'distribution']:
+    if ENABLE_PLOTS and plot_type in ['all', 'distribution']:
         plot.figure(figsize=figsize)
         num_channels = len(spend_cols)
         rows = (num_channels + 1) // 2
@@ -348,6 +340,35 @@ def saturation_hill(x, alpha, gamma):
     x = np.maximum(x, 1e-10)
     return (x ** gamma) / (x ** gamma + alpha ** gamma)
 
+
+def transform_media_series(
+    x,
+    adstock_type='geometric',
+    theta=None,
+    shape=None,
+    scale=None,
+    sat_alpha=1.0,
+    sat_gamma=1.0
+):
+    """
+    Apply adstock + normalized saturation for a media series.
+    Normalization keeps Hill params numerically stable across channels.
+    """
+    series = np.array(x, dtype=float)
+
+    if adstock_type == 'geometric':
+        adstocked = adstock_geometric(series, theta)
+    else:
+        adstocked = adstock_weibull(series, shape, scale)
+
+    # Robust scale to keep transformed values in a comparable range.
+    norm_scale = np.percentile(adstocked, 95)
+    if not np.isfinite(norm_scale) or norm_scale <= 1e-10:
+        norm_scale = np.max(adstocked) if np.max(adstocked) > 1e-10 else 1.0
+    adstocked_norm = adstocked / norm_scale
+
+    return saturation_hill(adstocked_norm, sat_alpha, sat_gamma)
+
 # %%
 # MMM Model Class (Robyn-style)
 class MMMModel:
@@ -428,64 +449,96 @@ class MMMOptimizer:
         self.best_params = None
         self.best_score = None
         
-    def objective_function(self, params, media_data, target, base_vars_data=None, 
-                          alpha_range=(0.1, 10.0), use_cv=True):
+    def objective_function(self, params, media_data, target, base_vars_data=None,
+                          alpha_range=(0.1, 3.0), val_split=OPTIMIZER_VALIDATION_SPLIT):
         """
         Objective function for hyperparameter optimization.
-        Minimizes NRMSE using cross-validation.
+        Minimizes NRMSE (Normalized Root Mean Squared Error).
         
-        Simplified: Only optimizes theta and ridge_alpha (skips saturation for stability)
+        Parameters:
+        -----------
+        params : array
+            Hyperparameters [adstock_param, saturation_alpha, saturation_gamma, ridge_alpha]
+        media_data : dict
+            Dictionary of media channel data
+        target : array
+            Target variable
+        base_vars_data : array, optional
+            Baseline variables
+        alpha_range : tuple
+            Range for saturation alpha (half-saturation point)
+        
+        Returns:
+        --------
+        float : NRMSE score
         """
         try:
-            # Extract parameters - simplified to just theta and ridge_alpha
+            # Extract parameters
             if self.adstock_type == 'geometric':
-                theta = np.clip(params[0], 0.1, 0.9)
-                ridge_alpha = np.clip(params[1], 1.0, 200.0)
+                theta = params[0]
+                # Ensure theta is in valid range
+                theta = np.clip(theta, 0.01, 0.99)
             else:  # weibull
-                shape = np.clip(params[0], 0.5, 5.0)
-                scale = np.clip(params[1], 1.0, 10.0)
-                ridge_alpha = np.clip(params[2], 1.0, 200.0)
+                shape = params[0]
+                scale = params[1]
+                shape = np.clip(shape, 0.1, 10.0)
+                scale = np.clip(scale, 0.1, 20.0)
             
-            # Transform media variables - adstock only (no saturation)
+            sat_alpha = params[-2] if self.adstock_type == 'geometric' else params[-2]
+            sat_gamma = params[-1]
+            ridge_alpha = params[-3] if self.adstock_type == 'geometric' else params[-3]
+            
+            # Clip saturation parameters
+            sat_alpha = np.clip(sat_alpha, alpha_range[0], alpha_range[1])
+            sat_gamma = np.clip(sat_gamma, 0.3, 3.0)
+            ridge_alpha = np.clip(ridge_alpha, 0.1, 200.0)
+            
+            # Transform media variables
             X_list = []
             for channel, data in media_data.items():
-                if self.adstock_type == 'geometric':
-                    adstocked = adstock_geometric(data, theta)
-                else:
-                    adstocked = adstock_weibull(data, shape, scale)
-                X_list.append(adstocked.reshape(-1, 1))
+                saturated = transform_media_series(
+                    data,
+                    adstock_type=self.adstock_type,
+                    theta=theta if self.adstock_type == 'geometric' else None,
+                    shape=shape if self.adstock_type != 'geometric' else None,
+                    scale=scale if self.adstock_type != 'geometric' else None,
+                    sat_alpha=sat_alpha,
+                    sat_gamma=sat_gamma
+                )
+                X_list.append(saturated.reshape(-1, 1))
             
+            # Combine features
             X_media = np.hstack(X_list)
             
+            # Add baseline variables if provided
             if base_vars_data is not None:
                 X = np.hstack([X_media, base_vars_data])
             else:
                 X = X_media
             
-            # Use cross-validation for robust evaluation
-            if use_cv and len(target) >= 20:
-                from sklearn.model_selection import cross_val_score, TimeSeriesSplit
-                
-                tscv = TimeSeriesSplit(n_splits=5)  # More splits for better estimate
-                scaler = StandardScaler()
-                X_scaled = scaler.fit_transform(X)
-                
-                model = Ridge(alpha=ridge_alpha)
-                cv_scores = cross_val_score(model, X_scaled, target, 
-                                           cv=tscv, scoring='neg_root_mean_squared_error')
-                rmse = -cv_scores.mean()
-                nrmse = rmse / (np.max(target) - np.min(target) + 1e-10)
-            else:
-                model = MMMModel(alpha=ridge_alpha, normalize=True, positive=False)
-                model.fit(X, target)
-                y_pred = model.predict(X)
-                rmse = np.sqrt(mean_squared_error(target, y_pred))
-                nrmse = rmse / (np.max(target) - np.min(target) + 1e-10)
+            # Use time-aware validation inside training to reduce overfitting.
+            n_samples = len(target)
+            val_len = max(8, int(n_samples * val_split))
+            if n_samples - val_len < 20:
+                return 1e10
+
+            split_idx = n_samples - val_len
+            X_fit, X_val = X[:split_idx], X[split_idx:]
+            y_fit, y_val = target[:split_idx], target[split_idx:]
+
+            # Fit model
+            model = MMMModel(alpha=ridge_alpha, normalize=True)
+            model.fit(X_fit, y_fit)
+            y_pred = model.predict(X_val)
+            
+            # Calculate NRMSE
+            rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+            nrmse = rmse / (np.max(y_val) - np.min(y_val) + 1e-10)
             
             return nrmse
             
         except Exception as e:
-            return 1e10
+            return 1e10  # Return large penalty for invalid parameters
     
     def optimize(self, media_data, target, base_vars_data=None, 
                  bounds=None, maxiter=50, popsize=15):
@@ -511,16 +564,14 @@ class MMMOptimizer:
         --------
         dict : Best parameters
         """
-        # Default bounds - simplified (no saturation parameters)
+        # Default bounds
         if bounds is None:
             if self.adstock_type == 'geometric':
-                # [theta, ridge_alpha]
-                # theta: 0.2-0.8 for meaningful adstock (memory of 2-5 weeks on average)
-                # ridge_alpha: 10-200 for strong regularization (many features)
-                bounds = [(0.2, 0.8), (10.0, 200.0)]
+                # [theta, ridge_alpha, sat_alpha, sat_gamma]
+                bounds = [(0.01, 0.95), (0.1, 200.0), (0.1, 3.0), (0.3, 3.0)]
             else:  # weibull
-                # [shape, scale, ridge_alpha]
-                bounds = [(0.5, 5.0), (1.0, 10.0), (10.0, 200.0)]
+                # [shape, scale, ridge_alpha, sat_alpha, sat_gamma]
+                bounds = [(0.1, 8.0), (0.1, 20.0), (0.1, 200.0), (0.1, 3.0), (0.3, 3.0)]
         
         # Optimize
         result = differential_evolution(
@@ -536,11 +587,13 @@ class MMMOptimizer:
         self.best_params = result.x
         self.best_score = result.fun
         
-        # Format results - simplified (no saturation)
+        # Format results
         if self.adstock_type == 'geometric':
             return {
                 'theta': result.x[0],
                 'ridge_alpha': result.x[1],
+                'saturation_alpha': result.x[2],
+                'saturation_gamma': result.x[3],
                 'nrmse': result.fun
             }
         else:
@@ -548,6 +601,8 @@ class MMMOptimizer:
                 'shape': result.x[0],
                 'scale': result.x[1],
                 'ridge_alpha': result.x[2],
+                'saturation_alpha': result.x[3],
+                'saturation_gamma': result.x[4],
                 'nrmse': result.fun
             }
 
@@ -583,20 +638,6 @@ def generate_response_curves(model, media_data, base_vars_data,
     spend_max = np.max(original_spend)
     spend_range = np.linspace(spend_min, spend_max, n_points)
     
-    # Get adstock parameters
-    if 'theta' in params:
-        adstock_param = params['theta']
-        adstock_func = lambda x: adstock_geometric(x, adstock_param)
-    else:
-        adstock_param = (params['shape'], params['scale'])
-        adstock_func = lambda x: adstock_weibull(x, params['shape'], params['scale'])
-    
-    # Check if saturation parameters exist (optional now)
-    use_saturation = 'saturation_alpha' in params and 'saturation_gamma' in params
-    if use_saturation:
-        sat_alpha = params['saturation_alpha']
-        sat_gamma = params['saturation_gamma']
-    
     # Calculate response for each spend level
     responses = []
     for spend in spend_range:
@@ -607,12 +648,16 @@ def generate_response_curves(model, media_data, base_vars_data,
         # Transform
         X_list = []
         for ch, data in modified_media.items():
-            adstocked = adstock_func(data)
-            if use_saturation:
-                transformed = saturation_hill(adstocked, sat_alpha, sat_gamma)
-            else:
-                transformed = adstocked
-            X_list.append(transformed.reshape(-1, 1))
+            saturated = transform_media_series(
+                data,
+                adstock_type='geometric' if 'theta' in params else 'weibull',
+                theta=params.get('theta'),
+                shape=params.get('shape'),
+                scale=params.get('scale'),
+                sat_alpha=params['saturation_alpha'],
+                sat_gamma=params['saturation_gamma']
+            )
+            X_list.append(saturated.reshape(-1, 1))
         
         X_media = np.hstack(X_list)
         if base_vars_data is not None:
@@ -659,25 +704,19 @@ class BudgetAllocator:
         Transform a dict of raw media series into the model feature matrix X.
         Uses the allocator's channel order to keep column alignment stable.
         """
-        use_saturation = 'saturation_alpha' in self.params and 'saturation_gamma' in self.params
-        
         X_list = []
         for ch in self.channel_names:
             series = np.array(media_dict[ch], dtype=float)
-            if 'theta' in self.params:
-                adstocked = adstock_geometric(series, self.params['theta'])
-            else:
-                adstocked = adstock_weibull(series, self.params['shape'], self.params['scale'])
-            
-            if use_saturation:
-                transformed = saturation_hill(
-                    adstocked,
-                    self.params['saturation_alpha'],
-                    self.params['saturation_gamma']
-                )
-            else:
-                transformed = adstocked
-            X_list.append(transformed.reshape(-1, 1))
+            saturated = transform_media_series(
+                series,
+                adstock_type='geometric' if 'theta' in self.params else 'weibull',
+                theta=self.params.get('theta'),
+                shape=self.params.get('shape'),
+                scale=self.params.get('scale'),
+                sat_alpha=self.params['saturation_alpha'],
+                sat_gamma=self.params['saturation_gamma']
+            )
+            X_list.append(saturated.reshape(-1, 1))
 
         X_media = np.hstack(X_list)
         if self.base_vars_data is not None:
@@ -789,21 +828,22 @@ class BudgetAllocator:
 
         media_all = {ch: np.array(self.media_data[ch], dtype=float) for ch in self.channel_names}
         media_wo = {ch: np.array(self.media_data[ch], dtype=float) for ch in self.channel_names}
-        media_wo[channel] = np.zeros_like(media_wo[channel])
+        media_wo[channel] = media_wo[channel] * (1.0 - COUNTERFACTUAL_REDUCTION)
 
         pred_all = self.model.predict(self._transform_media(media_all))
         pred_wo = self.model.predict(self._transform_media(media_wo))
 
-        contribution = float(np.sum(pred_all - pred_wo))
-        return contribution / channel_spend
+        # Scale local effect to total channel contribution approximation.
+        contribution = float(np.sum(pred_all - pred_wo) / max(COUNTERFACTUAL_REDUCTION, 1e-6))
+        raw_roas = contribution / channel_spend
+        return float(np.clip(raw_roas, 0.0, MAX_REASONABLE_ROAS))
 
 # %%
 # End-to-End MMM Workflow Function
 def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
                   media_spend_cols=None, base_vars=None,
                   adstock_type='geometric', trials=5, 
-                  optimize_hyperparams=True, train_test_split=0.8,
-                  use_log_transform=False, use_impressions=False):
+                  optimize_hyperparams=True, train_test_split=0.8):
     """
     Run end-to-end MMM workflow following Robyn methodology.
     
@@ -816,7 +856,7 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     dep_var : str
         Dependent variable (sales/revenue)
     media_spend_cols : list, optional
-        Media spend/impression columns (auto-detected if None)
+        Media spend columns (auto-detected if None)
     base_vars : list, optional
         Baseline variables
     adstock_type : str
@@ -827,10 +867,6 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         Whether to optimize hyperparameters
     train_test_split : float
         Proportion of data for training (default 0.8)
-    use_log_transform : bool
-        If True, uses log-log model: log(sales) ~ log(transformed_media)
-    use_impressions : bool
-        If True, uses impression columns (mdip_*) instead of spend (mdsp_*)
     
     Returns:
     --------
@@ -839,17 +875,11 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     print("="*80)
     print("ROBYN-STYLE MMM WORKFLOW")
     print("="*80)
-    print(f"Model Type: {'Log-Log' if use_log_transform else 'Linear'}")
-    print(f"Media Variable: {'Impressions (mdip_*)' if use_impressions else 'Spend (mdsp_*)'}")
     
     # 1. Prepare data
     print("\n[1/8] Preparing data...")
     if media_spend_cols is None:
-        # Auto-detect media columns based on use_impressions flag
-        if use_impressions:
-            media_spend_cols = [col for col in data.columns if "mdip_" in col]
-        else:
-            media_spend_cols = [col for col in data.columns if "mdsp_" in col]
+        media_spend_cols = [col for col in data.columns if "mdsp_" in col]
     
     if base_vars is None:
         base_vars = [col for col in data.columns if any(prefix in col 
@@ -862,9 +892,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     
     # Extract media data for training
     media_data_train = {}
-    prefix_to_remove = 'mdip_' if use_impressions else 'mdsp_'
     for col in media_spend_cols:
-        channel_name = col.replace(prefix_to_remove, '')
+        channel_name = col.replace('mdsp_', '')
         media_data_train[channel_name] = train_data[col].values
     
     # Extract target and baseline for training
@@ -874,19 +903,10 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     # Extract test data
     media_data_test = {}
     for col in media_spend_cols:
-        channel_name = col.replace(prefix_to_remove, '')
+        channel_name = col.replace('mdsp_', '')
         media_data_test[channel_name] = test_data[col].values
     target_test = test_data[dep_var].values
     base_vars_array_test = test_data[base_vars].values if len(base_vars) > 0 else None
-    
-    # Apply log transformation if enabled
-    if use_log_transform:
-        print("  - Applying log transformation to sales and media variables...")
-        target_train_original = target_train.copy()
-        target_test_original = target_test.copy()
-        target_train = np.log1p(target_train)  # log(1 + sales) to handle zeros
-        target_test = np.log1p(target_test)
-        # Note: Media variables will be log-transformed AFTER adstock/saturation
     
     print(f"  - Media channels: {list(media_data_train.keys())}")
     print(f"  - Baseline variables: {len(base_vars)}")
@@ -899,9 +919,9 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         optimizer = MMMOptimizer(adstock_type=adstock_type)
         best_params = optimizer.optimize(
             media_data_train, target_train, base_vars_array_train,
-            maxiter=30, popsize=10
+            maxiter=OPTIMIZATION_MAXITER, popsize=OPTIMIZATION_POPSIZE
         )
-        print(f"  - Best NRMSE (train): {best_params['nrmse']:.4f}")
+        print(f"  - Best NRMSE (validation): {best_params['nrmse']:.4f}")
         print(f"  - Parameters: {best_params}")
     else:
         # Use default parameters
@@ -913,35 +933,19 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
                           'saturation_alpha': 1.0, 'saturation_gamma': 1.0}
     
     # 3. Transform media variables (training)
-    # Simplified: Use only adstock transformation (skip saturation for stability)
     print("\n[3/8] Transforming media variables...")
-    
-    # Use a reasonable default theta if optimization found extreme value
-    theta_to_use = best_params.get('theta', 0.5)
-    if theta_to_use < 0.1 or theta_to_use > 0.9:
-        print(f"  - Warning: theta={theta_to_use:.2f} is extreme, using 0.5 instead")
-        theta_to_use = 0.5
-    
-    print(f"  - Using adstock theta: {theta_to_use:.2f}")
-    
     X_list_train = []
     for channel, channel_data in media_data_train.items():
-        # Apply adstock only (skip saturation for better generalization)
-        if adstock_type == 'geometric':
-            adstocked = adstock_geometric(channel_data, theta_to_use)
-        else:
-            adstocked = adstock_weibull(channel_data, 
-                                      best_params.get('shape', 1.0), 
-                                      best_params.get('scale', 1.0))
-        
-        # Skip saturation - it causes generalization issues
-        transformed = adstocked
-        
-        # Apply log transformation if enabled
-        if use_log_transform:
-            transformed = np.log1p(transformed)  # log(1 + x) to handle zeros
-        
-        X_list_train.append(transformed.reshape(-1, 1))
+        saturated = transform_media_series(
+            channel_data,
+            adstock_type=adstock_type,
+            theta=best_params.get('theta'),
+            shape=best_params.get('shape'),
+            scale=best_params.get('scale'),
+            sat_alpha=best_params['saturation_alpha'],
+            sat_gamma=best_params['saturation_gamma']
+        )
+        X_list_train.append(saturated.reshape(-1, 1))
     
     X_media_train = np.hstack(X_list_train)
     if base_vars_array_train is not None:
@@ -952,20 +956,16 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     # Transform test data
     X_list_test = []
     for channel, channel_data in media_data_test.items():
-        if adstock_type == 'geometric':
-            adstocked = adstock_geometric(channel_data, theta_to_use)
-        else:
-            adstocked = adstock_weibull(channel_data, 
-                                      best_params.get('shape', 1.0), 
-                                      best_params.get('scale', 1.0))
-        
-        transformed = adstocked
-        
-        # Apply log transformation if enabled
-        if use_log_transform:
-            transformed = np.log1p(transformed)
-        
-        X_list_test.append(transformed.reshape(-1, 1))
+        saturated = transform_media_series(
+            channel_data,
+            adstock_type=adstock_type,
+            theta=best_params.get('theta'),
+            shape=best_params.get('shape'),
+            scale=best_params.get('scale'),
+            sat_alpha=best_params['saturation_alpha'],
+            sat_gamma=best_params['saturation_gamma']
+        )
+        X_list_test.append(saturated.reshape(-1, 1))
     
     X_media_test = np.hstack(X_list_test)
     if base_vars_array_test is not None:
@@ -973,104 +973,25 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     else:
         X_test = X_media_test
     
-    # 4. Fit model with cross-validation for regularization
+    # 4. Fit model
     print("\n[4/8] Fitting MMM model...")
-    
-    # Use cross-validation to find optimal regularization
-    from sklearn.linear_model import RidgeCV
-    from sklearn.model_selection import cross_val_score
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    # Try different alpha values with cross-validation
-    alphas = np.logspace(-3, 3, 50)  # 0.001 to 1000
-    
-    # First, fit RidgeCV without positive constraint to find best alpha
-    ridge_cv = RidgeCV(alphas=alphas, cv=5, scoring='r2')
-    ridge_cv.fit(X_train_scaled, target_train)
-    best_alpha = ridge_cv.alpha_
-    
-    # Cross-validation score on training data
-    cv_scores = cross_val_score(
-        Ridge(alpha=best_alpha), 
-        X_train_scaled, target_train, 
-        cv=5, scoring='r2'
-    )
-    print(f"  - Cross-validation R² (mean ± std): {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-    print(f"  - Best regularization alpha: {best_alpha:.4f}")
-    
-    # Fit final model - try without positive constraint first for better fit
-    # Then check if coefficients make sense
-    model = MMMModel(alpha=best_alpha, normalize=True, positive=False)
+    model = MMMModel(alpha=best_params['ridge_alpha'], normalize=True)
     model.fit(X_train, target_train)
-    
-    # Check how many media coefficients are negative
-    n_media = len(media_data_train)
-    media_coefs = model.coefficients[:n_media]
-    n_negative = np.sum(media_coefs < 0)
-    
-    if n_negative > n_media // 2:
-        # If many negative, refit with positive constraint
-        print(f"  - Warning: {n_negative}/{n_media} media coefficients are negative, refitting with constraint...")
-        model = MMMModel(alpha=best_alpha, normalize=True, positive=True)
-        model.fit(X_train, target_train)
-    else:
-        print(f"  - Media coefficients: {n_media - n_negative} positive, {n_negative} negative")
-    
     y_pred_train = model.predict(X_train)
     y_pred_test = model.predict(X_test)
     
-    # Print coefficient diagnostics
-    print(f"\n  Model Diagnostics:")
-    print(f"    - Intercept: {model.intercept:.4f}")
-    
-    # Show media channel coefficients
-    n_media = len(media_data_train)
-    media_coefs = model.coefficients[:n_media]
-    media_names = list(media_data_train.keys())
-    
-    print(f"    - Media channel coefficients:")
-    for name, coef in zip(media_names, media_coefs):
-        status = "[OK]" if coef > 0.001 else "[NEAR ZERO]"
-        print(f"        {name}: {coef:.6f} {status}")
-    
-    # Summary stats for baseline coefficients
-    base_coefs = model.coefficients[n_media:]
-    print(f"    - Baseline variables: {len(base_coefs)} features")
-    print(f"        Mean: {np.mean(base_coefs):.4f}, Std: {np.std(base_coefs):.4f}")
-    print(f"        Non-zero (>0.001): {np.sum(np.abs(base_coefs) > 0.001)}/{len(base_coefs)}")
-    
-    # Transform predictions back from log space if needed
-    if use_log_transform:
-        y_pred_train_original = np.expm1(y_pred_train)  # exp(x) - 1 to reverse log1p
-        y_pred_test_original = np.expm1(y_pred_test)
-        # Keep log-space predictions for metrics in log space
-        y_pred_train_log = y_pred_train
-        y_pred_test_log = y_pred_test
-        # For evaluation, use original scale
-        y_pred_train = y_pred_train_original
-        y_pred_test = y_pred_test_original
-        target_train_for_metrics = target_train_original
-        target_test_for_metrics = target_test_original
-    else:
-        target_train_for_metrics = target_train
-        target_test_for_metrics = target_test
-    
     # Calculate metrics (training)
-    rmse_train = np.sqrt(mean_squared_error(target_train_for_metrics, y_pred_train))
-    nrmse_train = rmse_train / (np.max(target_train_for_metrics) - np.min(target_train_for_metrics) + 1e-10)
-    r2_train = r2_score(target_train_for_metrics, y_pred_train)
-    mae_train = mean_absolute_error(target_train_for_metrics, y_pred_train)
+    rmse_train = np.sqrt(mean_squared_error(target_train, y_pred_train))
+    nrmse_train = rmse_train / (np.max(target_train) - np.min(target_train) + 1e-10)
+    r2_train = r2_score(target_train, y_pred_train)
+    mae_train = mean_absolute_error(target_train, y_pred_train)
     
     # Calculate metrics (test)
-    rmse_test = np.sqrt(mean_squared_error(target_test_for_metrics, y_pred_test))
-    nrmse_test = rmse_test / (np.max(target_test_for_metrics) - np.min(target_test_for_metrics) + 1e-10)
-    r2_test = r2_score(target_test_for_metrics, y_pred_test)
-    mae_test = mean_absolute_error(target_test_for_metrics, y_pred_test)
-    mape_test = np.mean(np.abs((target_test_for_metrics - y_pred_test) / (target_test_for_metrics + 1e-10))) * 100
+    rmse_test = np.sqrt(mean_squared_error(target_test, y_pred_test))
+    nrmse_test = rmse_test / (np.max(target_test) - np.min(target_test) + 1e-10)
+    r2_test = r2_score(target_test, y_pred_test)
+    mae_test = mean_absolute_error(target_test, y_pred_test)
+    mape_test = np.mean(np.abs((target_test - y_pred_test) / (target_test + 1e-10))) * 100
     
     print(f"\n  Training Metrics:")
     print(f"    - R²: {r2_train:.4f}")
@@ -1130,72 +1051,70 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     # 6. Model diagnostics and residual analysis
     print("\n[6/8] Generating model diagnostics and residual analysis...")
     
-    # Calculate residuals for later use
-    residuals_train = target_train_for_metrics - y_pred_train
-    residuals_test = target_test_for_metrics - y_pred_test
+    # Plot actual vs predicted (train and test)
+    plot.figure(figsize=(16, 6))
     
-    if not SKIP_CHARTS:
-        # Plot actual vs predicted (train and test)
-        plot.figure(figsize=(16, 6))
-        
-        plot.subplot(1, 3, 1)
-        plot.scatter(target_train_for_metrics, y_pred_train, alpha=0.6, label='Train', s=30)
-        plot.scatter(target_test_for_metrics, y_pred_test, alpha=0.6, label='Test', s=30, marker='^')
-        plot.plot([min(target_train_for_metrics.min(), target_test_for_metrics.min()), 
-                   max(target_train_for_metrics.max(), target_test_for_metrics.max())], 
-                 [min(target_train_for_metrics.min(), target_test_for_metrics.min()), 
-                  max(target_train_for_metrics.max(), target_test_for_metrics.max())], 
-                 'r--', lw=2, label='Perfect Prediction')
-        plot.xlabel('Actual Sales', fontsize=11)
-        plot.ylabel('Predicted Sales', fontsize=11)
-        plot.title(f'Actual vs Predicted\nTrain R²={r2_train:.3f}, Test R²={r2_test:.3f}', 
-                   fontsize=12, fontweight='bold')
-        plot.legend()
-        plot.grid(True, alpha=0.3)
-        
-        # Residuals plot
-        plot.subplot(1, 3, 2)
-        plot.scatter(y_pred_train, residuals_train, alpha=0.6, label='Train', s=30)
-        plot.scatter(y_pred_test, residuals_test, alpha=0.6, label='Test', s=30, marker='^')
-        plot.axhline(y=0, color='r', linestyle='--', linewidth=2)
-        plot.xlabel('Predicted Sales', fontsize=11)
-        plot.ylabel('Residuals', fontsize=11)
-        plot.title('Residuals vs Predicted', fontsize=12, fontweight='bold')
-        plot.legend()
-        plot.grid(True, alpha=0.3)
-        
-        # Time series plot
-        plot.subplot(1, 3, 3)
-        all_dates = pd.concat([train_data[date_col], test_data[date_col]])
-        all_actual = np.concatenate([target_train_for_metrics, target_test_for_metrics])
-        all_pred = np.concatenate([y_pred_train, y_pred_test])
-        plot.plot(all_dates, all_actual, label='Actual', linewidth=2, alpha=0.7)
-        plot.plot(all_dates, all_pred, label='Predicted', linewidth=2, alpha=0.7)
-        plot.axvline(x=train_data[date_col].iloc[-1], color='g', linestyle='--', 
-                    linewidth=1, label='Train/Test Split')
-        plot.xlabel('Date', fontsize=11)
-        plot.ylabel('Sales', fontsize=11)
-        plot.title('Time Series: Actual vs Predicted', fontsize=12, fontweight='bold')
-        plot.legend()
-        plot.xticks(rotation=45)
-        plot.grid(True, alpha=0.3)
-        plot.tight_layout()
-        plot.show()
-        
-        # Q-Q plot for residuals
-        plot.figure(figsize=(12, 5))
-        
-        plot.subplot(1, 2, 1)
-        stats.probplot(residuals_train, dist="norm", plot=plot)
-        plot.title('Q-Q Plot: Training Residuals', fontsize=12, fontweight='bold')
-        plot.grid(True, alpha=0.3)
-        
-        plot.subplot(1, 2, 2)
-        stats.probplot(residuals_test, dist="norm", plot=plot)
-        plot.title('Q-Q Plot: Test Residuals', fontsize=12, fontweight='bold')
-        plot.grid(True, alpha=0.3)
-        plot.tight_layout()
-        plot.show()
+    plot.subplot(1, 3, 1)
+    plot.scatter(target_train, y_pred_train, alpha=0.6, label='Train', s=30)
+    plot.scatter(target_test, y_pred_test, alpha=0.6, label='Test', s=30, marker='^')
+    plot.plot([min(target_train.min(), target_test.min()), 
+               max(target_train.max(), target_test.max())], 
+             [min(target_train.min(), target_test.min()), 
+              max(target_train.max(), target_test.max())], 
+             'r--', lw=2, label='Perfect Prediction')
+    plot.xlabel('Actual Sales', fontsize=11)
+    plot.ylabel('Predicted Sales', fontsize=11)
+    plot.title(f'Actual vs Predicted\nTrain R²={r2_train:.3f}, Test R²={r2_test:.3f}', 
+               fontsize=12, fontweight='bold')
+    plot.legend()
+    plot.grid(True, alpha=0.3)
+    
+    # Residuals plot
+    residuals_train = target_train - y_pred_train
+    residuals_test = target_test - y_pred_test
+    
+    plot.subplot(1, 3, 2)
+    plot.scatter(y_pred_train, residuals_train, alpha=0.6, label='Train', s=30)
+    plot.scatter(y_pred_test, residuals_test, alpha=0.6, label='Test', s=30, marker='^')
+    plot.axhline(y=0, color='r', linestyle='--', linewidth=2)
+    plot.xlabel('Predicted Sales', fontsize=11)
+    plot.ylabel('Residuals', fontsize=11)
+    plot.title('Residuals vs Predicted', fontsize=12, fontweight='bold')
+    plot.legend()
+    plot.grid(True, alpha=0.3)
+    
+    # Time series plot
+    plot.subplot(1, 3, 3)
+    all_dates = pd.concat([train_data[date_col], test_data[date_col]])
+    all_actual = np.concatenate([target_train, target_test])
+    all_pred = np.concatenate([y_pred_train, y_pred_test])
+    plot.plot(all_dates, all_actual, label='Actual', linewidth=2, alpha=0.7)
+    plot.plot(all_dates, all_pred, label='Predicted', linewidth=2, alpha=0.7)
+    plot.axvline(x=train_data[date_col].iloc[-1], color='g', linestyle='--', 
+                linewidth=1, label='Train/Test Split')
+    plot.xlabel('Date', fontsize=11)
+    plot.ylabel('Sales', fontsize=11)
+    plot.title('Time Series: Actual vs Predicted', fontsize=12, fontweight='bold')
+    plot.legend()
+    plot.xticks(rotation=45)
+    plot.grid(True, alpha=0.3)
+    plot.tight_layout()
+    plot.show()
+    
+    # Q-Q plot for residuals
+    plot.figure(figsize=(12, 5))
+    
+    plot.subplot(1, 2, 1)
+    stats.probplot(residuals_train, dist="norm", plot=plot)
+    plot.title('Q-Q Plot: Training Residuals', fontsize=12, fontweight='bold')
+    plot.grid(True, alpha=0.3)
+    
+    plot.subplot(1, 2, 2)
+    stats.probplot(residuals_test, dist="norm", plot=plot)
+    plot.title('Q-Q Plot: Test Residuals', fontsize=12, fontweight='bold')
+    plot.grid(True, alpha=0.3)
+    plot.tight_layout()
+    plot.show()
     
     # 7. Response curves
     print("\n[7/8] Generating response curves...")
@@ -1204,25 +1123,22 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     rows = (n_channels + 1) // 2
     cols = 2 if n_channels > 1 else 1
     
+    plot.figure(figsize=(14, 4 * rows))
     for idx, channel in enumerate(media_data_train.keys(), 1):
         spend_range, responses = generate_response_curves(
             model, media_data_train, base_vars_array_train, channel, best_params
         )
         response_curves[channel] = (spend_range, responses)
-    
-    if not SKIP_CHARTS:
-        plot.figure(figsize=(14, 4 * rows))
-        for idx, channel in enumerate(media_data_train.keys(), 1):
-            spend_range, responses = response_curves[channel]
-            plot.subplot(rows, cols, idx)
-            plot.plot(spend_range, responses, linewidth=2)
-            plot.xlabel('Spend', fontsize=10)
-            plot.ylabel('Response (Sales)', fontsize=10)
-            plot.title(f'Response Curve: {channel.upper()}', fontsize=11, fontweight='bold')
-            plot.grid(True, alpha=0.3)
         
-        plot.tight_layout()
-        plot.show()
+        plot.subplot(rows, cols, idx)
+        plot.plot(spend_range, responses, linewidth=2)
+        plot.xlabel('Spend', fontsize=10)
+        plot.ylabel('Response (Sales)', fontsize=10)
+        plot.title(f'Response Curve: {channel.upper()}', fontsize=11, fontweight='bold')
+        plot.grid(True, alpha=0.3)
+    
+    plot.tight_layout()
+    plot.show()
     
     # 8. Budget allocation example
     print("\n[8/8] Budget allocation example...")
@@ -1241,8 +1157,6 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
     results = {
         'model': model,
         'params': best_params,
-        'use_log_transform': use_log_transform,
-        'use_impressions': use_impressions,
         'metrics': {
             'train': {
                 'r2': r2_train,
@@ -1263,8 +1177,8 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
             'test': y_pred_test
         },
         'actual': {
-            'train': target_train_for_metrics,
-            'test': target_test_for_metrics
+            'train': target_train,
+            'test': target_test
         },
         'decomposition': {
             'train': decomposition_train,
@@ -1273,9 +1187,6 @@ def run_robyn_mmm(data, date_col='wk_strt_dt', dep_var='sales',
         'response_curves': response_curves,
         'budget_allocation': allocation,
         'feature_names': list(media_data_train.keys()) + base_vars,
-        'media_channel_names': list(media_data_train.keys()),
-        'media_cols_used': media_spend_cols,  # Store which columns were used for training
-        'base_vars': base_vars,
         'coefficients': model.coefficients,
         'train_data': train_data,
         'test_data': test_data
@@ -1294,14 +1205,12 @@ mmm_results = run_robyn_mmm(
     mmm_data,
     date_col='wk_strt_dt',
     dep_var='sales',
-    media_spend_cols=mdip_col if USE_IMPRESSIONS else mdsp_col,
+    media_spend_cols=mdsp_col,
     base_vars=base_vars,
     adstock_type=ADSTOCK_TYPE,
     trials=5,
     optimize_hyperparams=OPTIMIZE_HYPERPARAMS,
-    train_test_split=TRAIN_TEST_SPLIT,
-    use_log_transform=USE_LOG_LOG_MODEL,
-    use_impressions=USE_IMPRESSIONS
+    train_test_split=TRAIN_TEST_SPLIT
 )
 
 # %%
@@ -1309,157 +1218,81 @@ mmm_results = run_robyn_mmm(
 # BASELINE MMM USING OLS (Alternative approach for comparison)
 # ============================================================================
 # Baseline MMM using OLS on raw spend and control variables
-# IMPROVEMENT: Now uses ALL media channels, ALL controls, adstock, and Ridge regression
+# Uses subset of media channels and control variables for simplicity
 
-def geometric_adstock_simple(x, decay=0.5):
-    """
-    Apply geometric adstock transformation for lagged marketing effects.
-    
-    Parameters:
-    -----------
-    x : array-like
-        Media variable to transform
-    decay : float
-        Decay rate (0-1). Higher = longer carryover effect
-    
-    Returns:
-    --------
-    array : Adstocked variable
-    """
-    adstocked = np.zeros_like(x, dtype=float)
-    adstocked[0] = x[0]
-    for i in range(1, len(x)):
-        adstocked[i] = x[i] + decay * adstocked[i-1]
-    return adstocked
+# Select subset of media channels (use first 3 if available, otherwise all)
+if len(mdsp_col) >= 3:
+    media_cols_baseline = mdsp_col[:3]
+else:
+    media_cols_baseline = mdsp_col
 
-# Use ALL media channels and control variables (not just subset)
-media_cols_baseline = mdsp_col  # All media spend columns
-control_cols_baseline = base_vars  # All control variables
+# Select subset of control variables (use first 2 if available)
+if len(base_vars) >= 2:
+    control_cols_baseline = base_vars[:2]
+else:
+    control_cols_baseline = base_vars if len(base_vars) > 0 else []
 
 print("\n" + "="*80)
-print("IMPROVED BASELINE OLS MMM")
+print("BASELINE OLS MMM")
 print("="*80)
-print(f"Media channels ({len(media_cols_baseline)}): {[col.replace('mdsp_', '') for col in media_cols_baseline]}")
-print(f"Control variables ({len(control_cols_baseline)}): {len(control_cols_baseline)} features")
-print(f"Using adstock transformation with decay=0.5")
-print(f"Using Ridge regression with regularization")
+print(f"Media channels: {[col.replace('mdsp_', '') for col in media_cols_baseline]}")
+print(f"Control variables: {control_cols_baseline}")
 
-# Apply adstock transformation to media variables
+# Log-transform sales and features to stabilize variance
 model_data = mmm_data.copy()
-adstock_decay = 0.5  # Can be optimized later
-
-for col in media_cols_baseline:
-    model_data[f'{col}_adstock'] = geometric_adstock_simple(model_data[col].values, decay=adstock_decay)
+model_data['sales_log'] = np.log1p(model_data['sales'])
+for col in media_cols_baseline + control_cols_baseline:
+    model_data[f'{col}_log'] = np.log1p(model_data[col])
 
 # Chronological train/test split (same split as Robyn model)
 split_point = int(len(model_data) * TRAIN_TEST_SPLIT)
 train_baseline = model_data.iloc[:split_point]
 test_baseline = model_data.iloc[split_point:]
 
-# Prepare features: adstocked media + all controls
-adstock_feature_cols = [f'{col}_adstock' for col in media_cols_baseline]
-feature_cols_all = adstock_feature_cols + control_cols_baseline
+# Prepare features
+feature_cols = [f'{col}_log' for col in media_cols_baseline + control_cols_baseline]
 
-# Create feature matrices
-X_train_baseline = train_baseline[feature_cols_all].values
-y_train_baseline = train_baseline['sales'].values
-X_test_baseline = test_baseline[feature_cols_all].values
+# Fit simple linear regression
+X_train_baseline = sm.add_constant(train_baseline[feature_cols])
+y_train_baseline = train_baseline['sales_log']
+baseline_ols_model = sm.OLS(y_train_baseline, X_train_baseline).fit()
+
+# Evaluate on holdout set
+X_test_baseline = sm.add_constant(test_baseline[feature_cols])
+y_test_baseline = test_baseline['sales_log']
+y_pred_baseline_log = baseline_ols_model.predict(X_test_baseline)
+
+# Convert back from log space
+y_pred_baseline = np.expm1(y_pred_baseline_log)
 y_test_baseline_actual = test_baseline['sales'].values
 
-# Standardize features (important for Ridge regression)
-scaler_baseline = StandardScaler()
-X_train_baseline_scaled = scaler_baseline.fit_transform(X_train_baseline)
-X_test_baseline_scaled = scaler_baseline.transform(X_test_baseline)
-
-# Fit Ridge regression (with regularization to prevent overfitting)
-# Ridge is better than OLS when you have many correlated features
-baseline_ridge_model = Ridge(alpha=100.0)  # Regularization strength
-baseline_ridge_model.fit(X_train_baseline_scaled, y_train_baseline)
-
-# Predictions
-y_pred_baseline_train = baseline_ridge_model.predict(X_train_baseline_scaled)
-y_pred_baseline = baseline_ridge_model.predict(X_test_baseline_scaled)
-
-# Calculate metrics for both train and test
-r2_baseline_train = r2_score(y_train_baseline, y_pred_baseline_train)
-rmse_baseline_train = np.sqrt(mean_squared_error(y_train_baseline, y_pred_baseline_train))
-mae_baseline_train = mean_absolute_error(y_train_baseline, y_pred_baseline_train)
-mape_baseline_train = np.mean(np.abs((y_train_baseline - y_pred_baseline_train) / (y_train_baseline + 1e-10))) * 100
-
-r2_baseline = r2_score(y_test_baseline_actual, y_pred_baseline)
-rmse_baseline = np.sqrt(mean_squared_error(y_test_baseline_actual, y_pred_baseline))
-mae_baseline = mean_absolute_error(y_test_baseline_actual, y_pred_baseline)
+# Calculate metrics
+rmse_baseline = np.sqrt(np.mean((y_test_baseline_actual - y_pred_baseline) ** 2))
 mape_baseline = np.mean(np.abs((y_test_baseline_actual - y_pred_baseline) / (y_test_baseline_actual + 1e-10))) * 100
+r2_baseline = r2_score(y_test_baseline_actual, y_pred_baseline)
+mae_baseline = mean_absolute_error(y_test_baseline_actual, y_pred_baseline)
 
-print("\n" + "-"*80)
-print("IMPROVED BASELINE MODEL RESULTS")
-print("-"*80)
-print(f"\nTraining Set Metrics:")
-print(f"  R²:   {r2_baseline_train:.4f}")
-print(f"  RMSE: {rmse_baseline_train:,.0f}")
-print(f"  MAE:  {mae_baseline_train:,.0f}")
-print(f"  MAPE: {mape_baseline_train:.2f}%")
-
+print("\nBaseline OLS Model Summary:")
+print(baseline_ols_model.summary())
 print(f"\nTest Set Metrics:")
-print(f"  R²:   {r2_baseline:.4f}")
-print(f"  RMSE: {rmse_baseline:,.0f}")
-print(f"  MAE:  {mae_baseline:,.0f}")
+print(f"  R²: {r2_baseline:.4f}")
+print(f"  RMSE: {rmse_baseline:.2f}")
+print(f"  MAE: {mae_baseline:.2f}")
 print(f"  MAPE: {mape_baseline:.2f}%")
 
-# Feature importance (top 10 most important features)
-feature_importance = pd.DataFrame({
-    'Feature': feature_cols_all,
-    'Coefficient': baseline_ridge_model.coef_
-})
-feature_importance['Abs_Coefficient'] = np.abs(feature_importance['Coefficient'])
-feature_importance = feature_importance.sort_values('Abs_Coefficient', ascending=False)
-
-print(f"\nTop 10 Most Important Features:")
-print(feature_importance[['Feature', 'Coefficient']].head(10).to_string(index=False))
-
 # Plot actual vs predicted sales
-if not SKIP_CHARTS:
-    plot.figure(figsize=(14,7))
-
-    # Subplot 1: Test set
-    plot.subplot(1, 2, 1)
-    plot.plot(test_baseline['wk_strt_dt'], y_test_baseline_actual, label='Actual', linewidth=2, alpha=0.7)
-    plot.plot(test_baseline['wk_strt_dt'], y_pred_baseline, label='Predicted', linewidth=2, alpha=0.7)
-    plot.legend()
-    plot.xlabel('Date', fontsize=11)
-    plot.ylabel('Sales', fontsize=11)
-    plot.title(f'Test Set: Improved Baseline Model (R² = {r2_baseline:.3f})', 
-               fontsize=12, fontweight='bold')
-    plot.grid(True, alpha=0.3)
-    plot.xticks(rotation=45)
-
-    # Subplot 2: Residuals
-    plot.subplot(1, 2, 2)
-    residuals = y_test_baseline_actual - y_pred_baseline
-    plot.scatter(y_pred_baseline, residuals, alpha=0.5)
-    plot.axhline(y=0, color='r', linestyle='--', linewidth=2)
-    plot.xlabel('Predicted Sales', fontsize=11)
-    plot.ylabel('Residuals', fontsize=11)
-    plot.title('Residual Plot (Test Set)', fontsize=12, fontweight='bold')
-    plot.grid(True, alpha=0.3)
-
-    plot.tight_layout()
-    plot.show()
-
-    # Additional diagnostic: Actual vs Predicted scatter
-    plot.figure(figsize=(8, 8))
-    plot.scatter(y_test_baseline_actual, y_pred_baseline, alpha=0.6)
-    plot.plot([y_test_baseline_actual.min(), y_test_baseline_actual.max()], 
-              [y_test_baseline_actual.min(), y_test_baseline_actual.max()], 
-              'r--', lw=2, label='Perfect Prediction')
-    plot.xlabel('Actual Sales', fontsize=12)
-    plot.ylabel('Predicted Sales', fontsize=12)
-    plot.title(f'Actual vs Predicted (Test Set, R² = {r2_baseline:.3f})', 
-               fontsize=13, fontweight='bold')
-    plot.legend()
-    plot.grid(True, alpha=0.3)
-    plot.tight_layout()
-    plot.show()
+plot.figure(figsize=(12,6))
+plot.plot(test_baseline['wk_strt_dt'], y_test_baseline_actual, label='Actual', linewidth=2, alpha=0.7)
+plot.plot(test_baseline['wk_strt_dt'], y_pred_baseline, label='Predicted', linewidth=2, alpha=0.7)
+plot.legend()
+plot.xlabel('Date', fontsize=12)
+plot.ylabel('Sales', fontsize=12)
+plot.title(f'Baseline OLS Model: Actual vs Predicted Sales (R² = {r2_baseline:.3f})', 
+           fontsize=13, fontweight='bold')
+plot.grid(True, alpha=0.3)
+plot.xticks(rotation=45)
+plot.tight_layout()
+plot.show()
 
 # %%
 # ============================================================================
@@ -1511,8 +1344,7 @@ print("="*80)
 
 def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt', 
                                      dep_var='sales', media_spend_cols=None, 
-                                     media_impression_cols=None,
-                                     use_log_transform=False):
+                                     media_impression_cols=None):
     """
     Calculate comprehensive metrics for each media channel by year.
     
@@ -1538,8 +1370,6 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
         Media spend column names
     media_impression_cols : list
         Media impression column names
-    use_log_transform : bool
-        Whether the model was trained with log-log transformation
     
     Returns:
     --------
@@ -1574,70 +1404,34 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
     
     # Get decomposition for all data
     # We need to transform all data and get contributions
-    # Use the same columns that the model was trained on
-    media_cols_used = mmm_results.get('media_cols_used', media_spend_cols)
-    media_channel_names_trained = mmm_results.get('media_channel_names', 
-        [col.replace('mdsp_', '').replace('mdip_', '') for col in media_cols_used])
-    
-    # Determine column prefix used during training
-    if len(media_cols_used) > 0:
-        if 'mdip_' in media_cols_used[0]:
-            col_prefix = 'mdip_'
-        else:
-            col_prefix = 'mdsp_'
-    else:
-        col_prefix = 'mdsp_'
-    
     media_data_all = {}
-    for ch in media_channel_names_trained:
-        col_name = f"{col_prefix}{ch}"
-        if col_name in all_data.columns:
-            media_data_all[ch] = all_data[col_name].values
-        else:
-            # Fallback: try the original column name
-            for col in media_cols_used:
-                if ch in col:
-                    media_data_all[ch] = all_data[col].values if col in all_data.columns else np.zeros(len(all_data))
-                    break
+    for col in media_spend_cols:
+        channel_name = col.replace('mdsp_', '')
+        media_data_all[channel_name] = all_data[col].values
     
     # Transform all media data
-    use_saturation = 'saturation_alpha' in params and 'saturation_gamma' in params
-    
     X_list_all = []
-    for channel in media_channel_names_trained:
-        if channel in media_data_all:
-            channel_data = media_data_all[channel]
-            if 'theta' in params:
-                adstocked = adstock_geometric(channel_data, params['theta'])
-            else:
-                adstocked = adstock_weibull(channel_data, params['shape'], params['scale'])
-            
-            if use_saturation:
-                transformed = saturation_hill(adstocked, 
-                                           params['saturation_alpha'],
-                                           params['saturation_gamma'])
-            else:
-                transformed = adstocked
-            
-            # Apply log transformation if enabled
-            if use_log_transform:
-                transformed = np.log1p(transformed)
-            X_list_all.append(transformed.reshape(-1, 1))
+    for channel, channel_data in media_data_all.items():
+        saturated = transform_media_series(
+            channel_data,
+            adstock_type='geometric' if 'theta' in params else 'weibull',
+            theta=params.get('theta'),
+            shape=params.get('shape'),
+            scale=params.get('scale'),
+            sat_alpha=params['saturation_alpha'],
+            sat_gamma=params['saturation_gamma']
+        )
+        X_list_all.append(saturated.reshape(-1, 1))
     
-    X_media_all = np.hstack(X_list_all) if X_list_all else np.array([]).reshape(len(all_data), 0)
+    X_media_all = np.hstack(X_list_all)
     
-    # Get base variables from stored mmm_results (more reliable than deriving from feature_names)
-    base_vars_list = mmm_results.get('base_vars', [])
+    # Get base variables
+    base_vars_list = mmm_results['feature_names'][len(media_data_all):] if \
+        len(mmm_results['feature_names']) > len(media_data_all) else []
     
     if len(base_vars_list) > 0:
-        # Filter to only include columns that exist in all_data
-        available_base_vars = [col for col in base_vars_list if col in all_data.columns]
-        if len(available_base_vars) > 0:
-            base_vars_array_all = all_data[available_base_vars].values
-            X_all = np.hstack([X_media_all, base_vars_array_all])
-        else:
-            base_vars_array_all = None
-            X_all = X_media_all
+        base_vars_array_all = all_data[base_vars_list].values
+        X_all = np.hstack([X_media_all, base_vars_array_all])
     else:
         base_vars_array_all = None
         X_all = X_media_all
@@ -1647,118 +1441,38 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
     # contribution_c[t] = pred_all[t] - pred_without_channel_c[t]
     # This is more stable/meaningful than coef * transformed_x when features are scaled.
     # ------------------------------------------------------------------------
-    # Use the channel names that the model was trained on
-    media_channel_names = media_channel_names_trained
+    media_channel_names = [col.replace('mdsp_', '') for col in media_spend_cols]
 
     def _transform_X_from_media_dict(media_dict):
-        """Build X using the same channel order as model training."""
+        """Build X using the same channel order as media_spend_cols."""
         X_list = []
         for ch in media_channel_names:
             series = np.array(media_dict[ch], dtype=float)
-            if 'theta' in params:
-                adstocked = adstock_geometric(series, params['theta'])
-            else:
-                adstocked = adstock_weibull(series, params['shape'], params['scale'])
-            
-            if use_saturation:
-                transformed = saturation_hill(
-                    adstocked,
-                    params['saturation_alpha'],
-                    params['saturation_gamma']
-                )
-            else:
-                transformed = adstocked
-            
-            # Apply log transformation if the model was trained with log-log
-            if use_log_transform:
-                transformed = np.log1p(transformed)
-            X_list.append(transformed.reshape(-1, 1))
+            saturated = transform_media_series(
+                series,
+                adstock_type='geometric' if 'theta' in params else 'weibull',
+                theta=params.get('theta'),
+                shape=params.get('shape'),
+                scale=params.get('scale'),
+                sat_alpha=params['saturation_alpha'],
+                sat_gamma=params['saturation_gamma']
+            )
+            X_list.append(saturated.reshape(-1, 1))
         X_media = np.hstack(X_list)
         if base_vars_array_all is not None:
             return np.hstack([X_media, base_vars_array_all])
         return X_media
 
-    # Build media dict using the same columns that the model was trained on
-    media_all = {}
+    # Build media dict in the proper order
+    media_all = {ch: np.array(all_data[f"mdsp_{ch}"].values, dtype=float) for ch in media_channel_names}
+    pred_all = model.predict(_transform_X_from_media_dict(media_all))
+
+    contrib_series = {}
     for ch in media_channel_names:
-        col_name = f"{col_prefix}{ch}"
-        if col_name in all_data.columns:
-            media_all[ch] = np.array(all_data[col_name].values, dtype=float)
-        else:
-            media_all[ch] = np.zeros(len(all_data))
-    
-    # ------------------------------------------------------------------------
-    # Calculate channel contributions
-    # For log-log models: use coefficient-based attribution (more stable)
-    # For linear models: use leave-one-out (standard approach)
-    # ------------------------------------------------------------------------
-    
-    pred_all_raw = model.predict(_transform_X_from_media_dict(media_all))
-    
-    # Get transformed X values for coefficient-based attribution
-    X_all_transformed = _transform_X_from_media_dict(media_all)
-    
-    if use_log_transform:
-        # For log-log models, use coefficient-based attribution
-        # This is more stable than leave-one-out which causes extreme predictions
-        # when zeroing channels in log space
-        
-        pred_all = np.expm1(pred_all_raw)  # Convert predictions to original scale
-        
-        # Get model coefficients (these are for scaled features)
-        coefficients = model.coefficients
-        n_media = len(media_channel_names)
-        media_coefficients = coefficients[:n_media]
-        
-        # Scale X values to match what model sees
-        if model.scaler is not None:
-            X_scaled = model.scaler.transform(X_all_transformed)
-        else:
-            X_scaled = X_all_transformed
-        
-        # Calculate contribution using coefficient × scaled_x approach
-        # Then convert to share of total predicted sales
-        contrib_series = {}
-        
-        # Total media contribution in log space
-        total_media_contrib_log = np.sum(
-            [media_coefficients[i] * X_scaled[:, i] for i in range(n_media)], 
-            axis=0
-        )
-        
-        for i, ch in enumerate(media_channel_names):
-            # Channel contribution in log space
-            ch_contrib_log = media_coefficients[i] * X_scaled[:, i]
-            
-            # Calculate share of media contribution
-            # Avoid division by zero
-            with np.errstate(divide='ignore', invalid='ignore'):
-                share = np.where(
-                    np.abs(total_media_contrib_log) > 1e-10,
-                    ch_contrib_log / total_media_contrib_log,
-                    0.0
-                )
-            
-            # Apply share to predicted sales minus baseline
-            # Baseline = intercept effect (when all media = 0)
-            baseline_pred_log = model.intercept
-            baseline_pred = np.expm1(baseline_pred_log) if baseline_pred_log > 0 else 0
-            
-            incremental_sales = pred_all - baseline_pred
-            incremental_sales = np.maximum(incremental_sales, 0)  # No negative contributions
-            
-            contrib_series[ch] = share * incremental_sales
-            
-    else:
-        # For linear models, leave-one-out works well
-        pred_all = pred_all_raw
-        
-        contrib_series = {}
-        for ch in media_channel_names:
-            media_wo = {k: np.array(v, dtype=float) for k, v in media_all.items()}
-            media_wo[ch] = np.zeros_like(media_wo[ch])
-            pred_wo = model.predict(_transform_X_from_media_dict(media_wo))
-            contrib_series[ch] = (pred_all - pred_wo)
+        media_wo = {k: np.array(v, dtype=float) for k, v in media_all.items()}
+        media_wo[ch] = media_wo[ch] * (1.0 - COUNTERFACTUAL_REDUCTION)
+        pred_wo = model.predict(_transform_X_from_media_dict(media_wo))
+        contrib_series[ch] = (pred_all - pred_wo) / max(COUNTERFACTUAL_REDUCTION, 1e-6)
     
     # Calculate metrics by channel and year
     summary_rows = []
@@ -1799,11 +1513,13 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
             else:
                 due_to = 0.0
             
-            # Calculate ROAS (Incremental Revenue / Spend)
-            # ROAS = Due-to / Spend
+            # Calculate ROAS (Incremental Revenue / Spend) with sanity guardrail.
             if spend > 0:
-                roas = due_to / spend
+                raw_roas = due_to / spend
+                roas = float(np.clip(raw_roas, 0.0, MAX_REASONABLE_ROAS))
+                due_to = roas * spend
             else:
+                raw_roas = 0.0
                 roas = 0.0
             
             # Calculate CPM (Cost Per Mille = Spend / Impressions * 1000)
@@ -1825,6 +1541,7 @@ def calculate_channel_metrics_by_year(data, mmm_results, date_col='wk_strt_dt',
                 'Spend': spend,
                 'Impressions': impressions if not np.isnan(impressions) else 0,
                 'ROAS': roas,
+                'ROAS (raw)': raw_roas,
                 'CPM': cpm if not np.isnan(cpm) else 0,
                 'Effectiveness': effectiveness if not np.isnan(effectiveness) else 0,
                 'Due-to Contribution': due_to
@@ -1841,8 +1558,7 @@ channel_metrics = calculate_channel_metrics_by_year(
     date_col='wk_strt_dt',
     dep_var='sales',
     media_spend_cols=mdsp_col,
-    media_impression_cols=mdip_col,
-    use_log_transform=USE_LOG_LOG_MODEL
+    media_impression_cols=mdip_col
 )
 
 # Format and display summary table
