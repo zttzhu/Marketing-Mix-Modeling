@@ -4,3 +4,4 @@ media_channel_metrics_by_year_*.csv
 outputs/
 .venv/
 __pycache__/
+run.log

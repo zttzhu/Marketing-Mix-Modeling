@@ -1,13 +1,8 @@
-# %%
-print("Hello Marketing Mix Modeling")
-# %%
-import numpy as np
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plot
-pd.set_option('display.float_format', '{:.2f}'.format)
+"""
+Legacy helper entrypoint.
 
-# %%
-mmm_data = pd.read_csv("mmm_data.csv")
-# %%
-# 
+Run `python mmm_script.py` for the full MMM workflow.
+"""
+
+if __name__ == "__main__":
+    print("Use `python mmm_script.py` to run the MMM workflow.")
