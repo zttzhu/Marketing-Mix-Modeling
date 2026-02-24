@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dataset-insights"
+version = "0.1.0"
+description = "CLI tool for instant CSV dataset orientation: schema, stats, missingness, and diagnostic plots"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "pandas>=1.5",
+    "matplotlib>=3.5",
+    "seaborn>=0.12",
+]
+
+[project.scripts]
+dataset-insights = "dataset_insights.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dataset_insights"]
