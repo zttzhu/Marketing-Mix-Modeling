@@ -29,6 +29,7 @@ This project implements a production-ready Marketing Mix Model (MMM) that:
 
 ## Recent Changes
 
+- Added `bayesian_mmm.py`, a direct-PyMC Bayesian MMM workflow with explicit priors, posterior diagnostics, and ROAS benchmark auditing.
 - Added a non-interactive script mode with `ENABLE_PLOTS=False` by default to avoid popup charts.
 - Updated hyperparameter optimization to use a validation split inside training for more robust generalization.
 - Standardized media transformation with normalized adstock+saturation to improve numerical stability.
@@ -77,6 +78,8 @@ This project implements a production-ready Marketing Mix Model (MMM) that:
 
 ## 📦 Requirements
 
+Use Python 3.10+.
+
 ```python
 numpy
 pandas
@@ -85,11 +88,13 @@ matplotlib
 scikit-learn
 scipy
 statsmodels
+pymc
+arviz
 ```
 
 Install dependencies:
 ```bash
-pip install numpy pandas seaborn matplotlib scikit-learn scipy statsmodels
+pip install -r requirements.txt
 ```
 
 ## 📊 Data Format
@@ -133,7 +138,7 @@ cd Marketing-Mix-Modeling
 
 2. Install dependencies:
 ```bash
-pip install numpy pandas seaborn matplotlib scikit-learn scipy statsmodels
+pip install -r requirements.txt
 ```
 
 3. Place your data file as `data.csv` in the project directory
@@ -142,7 +147,7 @@ pip install numpy pandas seaborn matplotlib scikit-learn scipy statsmodels
 
 ### Basic Usage
 
-Simply run the script:
+Run the Robyn-style benchmark workflow:
 ```bash
 python mmm_script.py
 ```
@@ -151,6 +156,35 @@ Or use in Jupyter Notebook:
 ```python
 # Run all cells in mmm_script.py
 ```
+
+### Bayesian MMM Usage
+
+Run the direct-PyMC Bayesian MMM workflow:
+
+```bash
+python bayesian_mmm.py --data data.csv --output-dir outputs/bayesian
+```
+
+For a quick smoke test with fewer MCMC draws:
+
+```bash
+python bayesian_mmm.py --quick --draws 100 --tune 100 --chains 2
+```
+
+The Bayesian workflow writes ignored artifacts under `outputs/bayesian/`:
+
+- `bayesian_parameter_summary.csv`
+- `bayesian_metrics.csv`
+- `bayesian_channel_contributions.csv`
+- `bayesian_roas_audit.csv`
+- `bayesian_media_priors.csv`
+- `bayesian_run_config.json`
+
+The ROAS audit uses current benchmark assumptions:
+
+- Linear TV: `vidtr`, target ROAS 1.5-4.0
+- Digital: `sem`, `so`, `on`, `inst`, `auddig`, `viddig`, target ROAS 2.0-5.0
+- Other/audit-only: `dm`, `nsp`, `audtr`
 
 ### Configuration
 
@@ -224,6 +258,35 @@ A simple OLS model is also provided for comparison:
 - Log-transformed variables
 - Linear regression on raw spend and control variables
 - Same train/test split for fair comparison
+
+### Direct PyMC Bayesian MMM
+
+`bayesian_mmm.py` fits a Bayesian MMM designed for posterior uncertainty and ROAS diagnostics:
+
+1. **Media Transform**
+   - Uses all `mdsp_*` spend columns.
+   - Scales spend by the training 95th percentile.
+   - Applies finite-lag geometric adstock with normalized lag weights.
+   - Applies exponential saturation: `1 - exp(-lambda * adstocked_spend)`.
+
+2. **Selected Controls**
+   - Uses `me_ics_all`, `me_gas_dpg`, `st_ct` when present.
+   - Adds one `holiday_any` feature from all `hldy_*` columns.
+   - Adds compact Fourier seasonality terms.
+
+3. **Explicit Priors**
+   - `intercept ~ Normal(1.0, 0.5)`
+   - `theta_channel ~ Beta(2, 2)`
+   - `saturation_lambda_channel ~ Gamma(2, 1)`
+   - `media_total_effect_channel ~ LogNormal(...)`
+   - `control_beta ~ Normal(0, 0.2)`
+   - `sigma ~ HalfNormal(0.2)`
+
+4. **ROAS Handling**
+   - Media effects are parameterized as total train-period channel contribution.
+   - ROAS benchmark ranges are translated into LogNormal priors for those total effects.
+   - The posterior ROAS audit still reports medians and credible intervals, then flags each benchmarked channel as below, within, or above target.
+   - The workflow does not clip or cap reported ROAS.
 
 ## ⚙️ Configuration
 
@@ -313,6 +376,9 @@ Side-by-side comparison of:
 ### 7. Exported Files
 
 - `media_channel_metrics_by_year.csv`: Detailed metrics by channel and year
+- `outputs/bayesian/bayesian_roas_audit.csv`: Posterior ROAS audit with target-range flags
+- `outputs/bayesian/bayesian_metrics.csv`: Bayesian train/test metrics and diagnostics output
+- `outputs/bayesian/bayesian_media_priors.csv`: Channel-level ROAS prior assumptions used by the Bayesian model
 
 ## 🔧 Key Functions
 
@@ -461,4 +527,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ---
 
 For detailed code review and recommendations, see `MMM_SCRIPT_REVIEW.md`.
-
